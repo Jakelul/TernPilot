@@ -1,0 +1,52 @@
+<!-- DUORELAY:BEGIN -->
+## TernPilot — automatic task routing in new Codex conversations
+
+- The user requested automatic installation and application after being told
+  that delegated requests, relevant code, and task summaries are sent to
+  Anthropic Claude and Google Gemini. This authorizes bounded local CLI
+  delegation in new Codex conversations on this Mac. Never include secrets,
+  credentials, or unrelated history. Respect user/project restrictions,
+  normal tool approvals, and the existing Headroom provider and hooks.
+- Keep Codex as coordinator. Routine planning, summaries, brainstorming, and
+  general feedback go to Gemini Pro. Substantial implementation/build/debugging
+  uses Astra or Opus-class models. Architecture, important reviews, security,
+  authentication, payments, migrations, and possible data loss require the
+  strong tier, even when the request is called planning or feedback.
+- Before using Gemini, read `{{INSTALL_DIR}}/config.json`. When gemini_enabled
+  is false, temporarily use Claude for planning/summaries too. Do not repeatedly
+  call an ineligible account, log the user out, or switch billing methods.
+  Enable Gemini only after login/eligibility is resolved and a check succeeds.
+- Use clear rules first; do not call another model just to classify an obvious
+  task. Briefly state the engine and reason when delegating. Keep simple direct
+  answers in the current conversation when delegation adds more overhead than
+  it saves. Never claim coordinating Codex/ChatGPT consumes zero usage.
+- For an existing Git repo, use:
+  `{{INSTALL_DIR}}/dev --repo REPO --engine ENGINE -- TASK`
+  ENGINE is gemini for read-only planning, claude for strong design/review, or
+  codex for a bounded Astra implementation task. Auto routing is also supported.
+  If the current Codex model already meets the requested strong tier, work
+  directly instead of duplicating work. Preserve the user's selected app model.
+- Supply the scoped request, constraints, relevant decisions, failed checks,
+  and expected result. Preserve user changes. Do not edit concurrently with
+  a worker in the same repo. Use argument arrays or correct shell quoting.
+  Check the final JSON/exit status and important changes before completion.
+- For non-Git or strict no-file-write requests, do not create a Git repo.
+  Supply self-contained context on stdin to the native CLI. Claude command:
+  `claude -p --model claude-opus-5-5 --output-format json --tools "" --no-session-persistence`.
+  Gemini command: `gemini --model pro --output-format json --approval-mode plan
+  --prompt "Read the task on stdin. Return analysis only; do not use subagents."`.
+  Set DUORELAY_CHILD=1 only in the child environment. If Gemini's account is
+  ineligible, report this and continue with a permitted strong engine; do not
+  retry every turn or silently switch to an API key or Flash model.
+- DUORELAY_CHILD=1 marks a TernPilot worker (legacy compatibility name). If set,
+  finish the assigned task directly: do not launch another router, Codex,
+  Claude, Gemini, or subagent. Never relay an entire conversation recursively.
+- Never switch engines to bypass a permission denial. Keep denied tasks blocked.
+  Never downgrade implementation or high-impact tasks to Gemini when a strong
+  model runs out of quota. Respect explicit model choices and stop requests.
+- This is new-session guidance, not a universal input interceptor or background
+  supervisor. It cannot run after Codex has stopped execution for quota.
+  Full process-level fallback applies to tasks launched through TernPilot.
+  ChatGPT web/Desktop and remote Macs require their own supported integration;
+  do not claim this file enables them.
+<!-- DUORELAY:END -->

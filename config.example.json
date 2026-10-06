@@ -1,0 +1,13 @@
+{
+  "codex_bin": "codex",
+  "claude_bin": "claude",
+  "gemini_bin": "gemini",
+  "codex_model": "gpt-6-astra",
+  "claude_model": "claude-opus-5-5",
+  "gemini_model": "pro",
+  "gemini_enabled": true,
+  "codex_attempts": 2,
+  "timeout_seconds": 3600,
+  "claude_keywords": ["설계", "아키텍처", "복잡한 디버깅", "코드리뷰", "코드 리뷰", "architecture", "design", "complex debugging", "code review"],
+  "gemini_keywords": ["기획", "아이디어", "요약", "일반 피드백", "브레인스토밍", "planning", "brainstorm", "summarize", "summary", "general feedback"]
+}
