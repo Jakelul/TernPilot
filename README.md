@@ -7,7 +7,7 @@ Local AI task routing across Codex, Claude Code and Gemini CLI.
 
 [Download the macOS preview](https://github.com/Jakelul/TernPilot/releases) · [Cloud development](CLOUD_START.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)
 
-이전 이름은 DuoRelay입니다. TernPilot은 기존 Codex·Claude Code·Gemini CLI로 작업을 나누고 각 계정의 사용량을 사용합니다. 현재 Mac용 프리뷰이며 Python 표준 라이브러리만 사용합니다. 세 서비스의 토큰 잔액을 합치는 기능은 아닙니다.
+TernPilot은 기존 Codex·Claude Code·Gemini CLI로 작업을 나누고 각 계정의 사용량을 사용합니다. 현재 Mac용 프리뷰이며 Python 표준 라이브러리만 사용합니다. 세 서비스의 토큰 잔액을 합치는 기능은 아닙니다.
 
 ## 사용
 
