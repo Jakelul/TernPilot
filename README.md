@@ -155,16 +155,16 @@ Obsidian Sync의 원격 볼트 연결은 각 Mac에서 별도로 설정합니다
 
 왼쪽은 프로젝트 폴더와 선택한 프로젝트의 대화 목록으로 구분합니다. 프로젝트 등록은 chat-config.json의 projects에서 관리합니다.
 
-상단은 모델명과 잔여 한도 표시만 제공합니다. Codex와 Claude는 현재 로그인 계정의 7일 한도를 60초마다 조회합니다. Argon은 기존 Token Cat 상태표시줄 연동의 명시적인 Argon/Gemini 주간 버킷을 읽어 표시합니다. 토큰 사용 비중으로 대체하지 않습니다. 사용 기록은 기본으로 접혀 있으며 제목 오른쪽 삼각형으로 펼칩니다. 아래 사용 기록을 누르면 실행 ID, 프로젝트, 요청, 상태, 분류/작업별 토큰과 캐시 보고값을 볼 수 있습니다. 새 실행은 `.ai/router-runs/<실행ID>/task.json`에 요청 연결 정보를 보존합니다. 이전 로그에서 요청을 복원할 수 없으면 “요청 기록 없음”으로 표시합니다. 새 웹 대화의 Markdown에도 실행 ID와 사용 내역을 함께 기록합니다. 크레딧은 제공자가 보고하지 않아 추정하지 않습니다.
+상단은 모델명과 잔여 한도 표시만 제공합니다. Codex와 Claude는 현재 로그인 계정의 7일 한도를 60초마다 조회합니다. Argon은 기존 Gemini CLI 계정의 Argon 전용 주간 버킷을 직접 조회합니다. 토큰 사용 비중으로 대체하지 않습니다. 사용 기록은 기본으로 접혀 있으며 제목 오른쪽 삼각형으로 펼칩니다. 아래 사용 기록을 누르면 실행 ID, 프로젝트, 요청, 상태, 분류/작업별 토큰과 캐시 보고값을 볼 수 있습니다. 새 실행은 `.ai/router-runs/<실행ID>/task.json`에 요청 연결 정보를 보존합니다. 이전 로그에서 요청을 복원할 수 없으면 “요청 기록 없음”으로 표시합니다. 새 웹 대화의 Markdown에도 실행 ID와 사용 내역을 함께 기록합니다. 크레딧은 제공자가 보고하지 않아 추정하지 않습니다.
 
 
 주간 조회는 Codex app-server의 account/rateLimits/read와 Claude의 OAuth usage 응답을 사용합니다. Claude는 기존 macOS Keychain CLI 자격 증명을 요청 시에만 읽으며 앱이나 볼트에 저장하지 않습니다. Claude 조회 엔드포인트는 변경될 수 있습니다. 숫자에 마우스를 올리면 조회 시각과 초기화 시각을 볼 수 있습니다. 서버가 실행 중일 때 60초마다 갱신하며, 조회 실패 시 미확인으로 바꾸고 재시도 간격을 최소 5분으로 늘립니다. 구독 한도 조회 자체는 모델 생성을 실행하지 않습니다. Argon의 일간/모델별 한도를 주간으로 환산하지 않습니다.
 
 
 ### Argon 주간 자동 갱신
-이 Mac에서는 사용자의 명시적 승인으로 chat-config.json의 argon_quota_repo를 TernPilot 경로로 지정했습니다. 서버는 별도 Antigravity CLI 세션에서 내장 /usage만 실행하고 종료한 뒤 60초 간격으로 다시 조회합니다. CLI 시작/조회 시간만큼 실제 간격은 늘어날 수 있습니다. 일반 모델 프롬프트는 전송하지 않습니다. 초기 프롬프트 옵션(-i /usage)은 모델 요청으로 해석될 수 있어 사용하지 않습니다.
+서버는 `agy --print /usage --output-format json`으로 내장 사용량 정보만 조회합니다. 정상 조회 후 60초 간격으로 갱신하며 CLI 응답 시간만큼 실제 간격은 늘어날 수 있습니다. 모델 생성, 대화형 권한 승인, 새 로그인은 실행하지 않습니다. 기존 config.json의 gemini_bin을 사용하며 인증·과금 우회 설정은 거부합니다.
 
-기존 Token Cat의 `~/Library/Application Support/TokenCat/antigravity-quota.json` 연동이 필요합니다. 상태표시줄 설정을 덮어쓰지 않습니다. `gemini-argon-wtu-weekly`와 `gemini-weekly` 중 낮은 잔여율을 표시하며 5시간/타사 모델 버킷은 제외합니다. 120초 이상 오래된 관측값, 로그아웃, 만료되거나 잘못된 값은 미확인으로 처리합니다. 다른 Mac에서는 이 연동과 프로젝트 신뢰 승인을 별도로 준비해야 합니다. 설정을 생략하면 기존 관측 파일만 읽으며 자동으로 CLI를 시작하지 않습니다.
+Argon 전용 `gemini-argon-wtu-weekly`의 잔여 비율과 초기화 시각을 표시합니다. Pro의 Argon 한도는 Gemini 공통 한도와 별개이므로 둘 중 최솟값을 사용하지 않습니다. 전용 버킷이 없거나 조회가 실패하면 미확인으로 표시하고 재시도합니다. 120초 이상 오래된 값은 숨깁니다. Token Cat 상태표시줄 파일이나 argon_quota_repo 설정은 필요하지 않습니다. 다른 Mac에서도 기존 agy 로그인은 필요합니다.
 
 
 ## 두 Mac에서 자동 업데이트
@@ -184,4 +184,4 @@ macOS 로그인 시와 매시간 GitHub를 확인합니다. 새 커밋을 임시
 - 즉시 확인: `python3 ~/Documents/Codex/TernPilot/update.py`
 - 중지: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.ternpilot.update.plist` 후 해당 plist를 삭제합니다.
 
-컴퓨터가 꺼져 있거나 로그아웃 상태이면 업데이트는 다음 로그인 후 진행됩니다. GitHub 코드는 동기화되지만 각 Mac의 로그인과 Obsidian Sync 연결은 별도입니다. Argon 주간 게이지는 각 기기의 Token Cat Antigravity statusLine 어댑터가 필요합니다.
+컴퓨터가 꺼져 있거나 로그아웃 상태이면 업데이트는 다음 로그인 후 진행됩니다. GitHub 코드는 동기화되지만 각 Mac의 로그인과 Obsidian Sync 연결은 별도입니다. Argon 주간 게이지는 각 기기의 기존 agy 로그인으로 직접 조회합니다.

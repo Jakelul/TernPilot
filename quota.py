@@ -3,15 +3,11 @@ import json
 import math
 import os
 import signal
-import pty
-import select
-import re
-import fcntl
-import struct
-import termios
 import queue
 import subprocess
 import threading
+import tempfile
+from datetime import datetime
 import time
 from pathlib import Path
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -117,89 +113,42 @@ def read_claude():
     return {'remaining':remaining(window.get('utilization')), 'resets_at':window.get('resets_at'), 'window':'7일 · 계정 공유'}
 
 
-def argon_weekly(data, now=None):
+def argon_usage(data, now=None):
+    """Use the Argon bucket, which is separate from common Gemini on Pro."""
     now = time.time() if now is None else now
-    observed = data.get('quotaUpdated')
-    if (data.get('connected') is not True or type(observed) not in (int, float)
-            or not math.isfinite(observed) or not 0 <= now - observed <= 120):
-        raise ValueError('Fresh Antigravity CLI observation required')
-    windows = data.get('windows')
-    if not isinstance(windows, list):
-        raise ValueError('Antigravity weekly buckets unavailable')
-    accepted = {'gemini-argon-wtu-weekly', 'gemini-weekly'}
-    candidates = []
-    specific = False
-    for window in windows:
-        if not isinstance(window, dict):
-            continue
-        bucket = window.get('bucket')
-        key = bucket.removeprefix('Antigravity · ') if isinstance(bucket, str) else ''
-        if key not in accepted:
-            continue
-        percent = window.get('remaining')
-        reset = window.get('reset')
-        if (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100
-                or type(reset) not in (int, float) or not math.isfinite(reset) or reset <= now):
-            raise ValueError('Invalid or expired Antigravity quota')
-        specific |= key == 'gemini-argon-wtu-weekly'
-        candidates.append((percent, reset, key))
-    if not specific:
-        raise ValueError('Argon-specific weekly bucket unavailable')
-    percent, reset, key = min(candidates)
-    return {'remaining': round(percent, 1), 'resets_at': reset, 'window':'주간 · Argon/공통 중 낮은 잔여율',
-            'observed_at': observed, 'source':'Antigravity CLI 상태표시줄', 'bucket':key}
+    command = data.get('command', {})
+    if data.get('status') != 'SUCCESS' or command.get('name') != 'usage':
+        raise ValueError('Antigravity usage unavailable')
+    for group in command.get('data', {}).get('groups', []):
+        for bucket in group.get('buckets', []):
+            if bucket.get('id') != 'gemini-argon-wtu-weekly':
+                continue
+            fraction = bucket.get('remaining_fraction')
+            if (bucket.get('window') != 'weekly' or type(fraction) not in (int, float)
+                    or not math.isfinite(fraction) or not 0 <= fraction <= 1):
+                raise ValueError('Invalid Argon quota')
+            reset = datetime.fromisoformat(bucket['reset_time'].replace('Z', '+00:00'))
+            if reset.tzinfo is None or reset.timestamp() <= now:
+                raise ValueError('Expired Argon quota')
+            return {'remaining': round(fraction * 100, 1), 'resets_at': reset.timestamp(),
+                    'window': '7일 · Argon 전용', 'observed_at': now,
+                    'source': 'Gemini CLI /usage · 60초 갱신', 'bucket': bucket['id']}
+    raise ValueError('Argon-specific weekly bucket unavailable')
 
 
 def read_argon():
-    path = Path.home() / 'Library/Application Support/TokenCat/antigravity-quota.json'
-    if path.is_symlink():
-        raise ValueError('Refusing quota symlink')
-    return argon_weekly(json.loads(path.read_text()))
-
-
-def refresh_argon(repo):
-    """Open only the built-in usage panel, then stop our dedicated CLI session."""
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
-    proc = None
-    started = time.time()
-    try:
-        proc = subprocess.Popen(['/opt/homebrew/bin/agy', '--model', 'gemini-4-argon-high', '--sandbox'],
-                                cwd=repo, stdin=slave, stdout=slave, stderr=slave,
-                                start_new_session=True, env=dict(os.environ, DUORELAY_CHILD='1'))
-        os.close(slave);slave = None
-        output = ''
-        deadline = time.monotonic() + 40
-        sent = False
-        typed_offset = None
-        while time.monotonic() < deadline and proc.poll() is None:
-            if select.select([master], [], [], 0.2)[0]:
-                output += os.read(master, 65536).decode(errors='replace')
-                output = output[-120000:]
-            clean = re.sub(r'\x1b\[[0-9;? >]*[a-zA-Z]', '', output)
-            if 'Do you trust' in clean or 'Generating' in clean:
-                raise ValueError('Usage-only CLI requires attention')
-            if typed_offset is None and 'Google AI' in clean and 'Gemini 4 Argon' in clean:
-                # Never use -i /usage: that sends a model prompt instead of a slash command.
-                typed_offset = len(clean)
-                os.write(master, b'/usage')
-            elif not sent and typed_offset is not None and '/usage' in clean[typed_offset:] and 'View model quota usage' in clean[typed_offset:]:
-                os.write(master, b'\r')
-                sent = True
-            if sent and 'Weekly Limit Remaining' in clean:
-                try:
-                    value = read_argon()
-                except (OSError, ValueError):
-                    continue
-                if value['observed_at'] >= started:
-                    return value
-        raise ValueError('Antigravity quota refresh timed out')
-    finally:
-        if proc is not None:
-            stop_group(proc)
-        if slave is not None:
-            os.close(slave)
-        os.close(master)
+    # Fixed metadata command: no model prompt, interactive approvals or token cache.
+    from router import load_config
+    from gemini import check_settings, gemini_environment
+    from assist import execute
+    config = load_config()
+    check_settings(Path(__file__).resolve().parent)
+    with tempfile.TemporaryDirectory(prefix='ternpilot-quota-') as work:
+        code, raw, _ = execute([config['gemini_bin'], '--print', '/usage', '--output-format', 'json'],
+                               work, gemini_environment(), timeout=20)
+    if code:
+        raise ValueError('Antigravity usage request failed')
+    return argon_usage(json.loads(raw))
 
 
 class QuotaMonitor:
@@ -210,7 +159,7 @@ class QuotaMonitor:
         self.stop = threading.Event()
         self.threads = []
         self.values = {engine:{'remaining':None,'status':'확인 중','checked_at':None} for engine in ['codex','claude']}
-        self.values['gemini'] = {'remaining':None,'status':'CLI 주간 기록 확인 중','checked_at':None}
+        self.values['gemini'] = {'remaining':None,'status':'Argon 주간 한도 조회 중','checked_at':None}
 
     def snapshot(self):
         with self.lock:
@@ -226,7 +175,7 @@ class QuotaMonitor:
             value = dict(fetch(), status='연결됨', checked_at=time.time())
         except Exception:
             # Do not surface subprocess/HTTP text that might contain credentials.
-            value = {'remaining':None,'status':('최신 CLI 관측 필요 · Antigravity에서 /usage 열기' if engine == 'gemini' else '조회 실패 · 로그인 또는 한도 API 확인 필요'),'checked_at':time.time()}
+            value = {'remaining':None,'status':('Argon 한도 조회 실패 · 자동 재시도 중' if engine == 'gemini' else '조회 실패 · 로그인 또는 한도 API 확인 필요'),'checked_at':time.time()}
         with self.lock:
             self.values[engine] = value
 
@@ -235,7 +184,7 @@ class QuotaMonitor:
             while not self.stop.is_set():
                 self.refresh(engine, fetch)
                 self.stop.wait(self.interval if self.snapshot()[engine]["remaining"] is not None else max(300, self.interval))
-        for engine, fetch in [('codex',read_codex),('claude',read_claude),('gemini',(lambda: refresh_argon(self.argon_repo)) if self.argon_repo else read_argon)]:
+        for engine, fetch in [('codex',read_codex),('claude',read_claude),('gemini',read_argon)]:
             worker = threading.Thread(target=loop,args=(engine,fetch),daemon=True)
             self.threads.append(worker)
             worker.start()
