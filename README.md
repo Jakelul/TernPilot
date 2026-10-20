@@ -82,11 +82,13 @@ Gemini는 공식 Antigravity CLI (`agy`)를 통해 구독 계정으로 연결합
 
 Gemini CLI 이용 자격은 Gemini 웹 구독과 별개일 수 있습니다. 계정이 `IneligibleTierError`를 반환하면 `config.json`의 `gemini_enabled`를 `false`로 두고 로그인·CLI 자격을 먼저 해결하세요. 설치 프로그램은 Gemini를 기본 비활성화합니다.
 
-Codex quota/rate-limit은 즉시 다른 미사용 강한 엔진으로 넘기고 일반 실패는 기본 두 번 시도합니다. Gemini 실패는 Claude, 필요하면 Codex로 승격합니다. 강한 모델의 작업을 Gemini로 낮추지 않습니다. 사용 가능한 강한 엔진을 소진하면 종료합니다. 권한/승인 거부는 다른 엔진으로 우회하지 않습니다.
+명시적인 사용량 소진만 다른 미사용 강한 엔진으로 넘깁니다. 일시적인 429, 일반 오류, 시간 초과는 제공자 전환 사유가 아니며 Codex는 설정된 횟수만 같은 엔진을 재시도합니다. `--no-fallback`은 재시도와 제공자 전환을 모두 중지하며 Astra 분류 단계에도 적용됩니다. 권한·승인·계정 확인 실패는 다른 엔진으로 우회하지 않습니다.
+
+기존 `config.json`의 `default_engine`은 유지됩니다. CLI의 `--engine`이 이를 우선하며 `auto`이면 Astra 분류를 사용합니다. 기존 `job.py`, `control.py`, 도구 없는 `assist.py`, Gemini 계정 검증과 Token Cat 숫자 사용량 기록도 설치·업데이트에 포함됩니다. Claude/Gemini 작업은 기존 구독 로그인·제공자·과금 설정 검증을 통과해야 하며 일반 프로젝트 권한과 Headroom 설정은 유지합니다.
 
 ## 상태·중단·기록
 
-실행 시 저장소의 `.ai/`에 `HANDOFF.json`, `DECISIONS.md`, `history.jsonl`, 실행별 로그를 만듭니다. 기존 소유 표시가 없는 상태 파일과 심볼릭 링크는 거부하며 동일 저장소의 중복 실행을 잠급니다. reset/stash/commit은 자동 수행하지 않습니다. Gemini는 프로젝트 파일과 DECISIONS.md를 수정하지 않습니다.
+실행 시 저장소의 `.ai/`에 `HANDOFF.json`, `DECISIONS.md`, `history.jsonl`, 실행별 로그를 만듭니다. 기존 소유 표시가 없는 상태 파일과 심볼릭 링크는 거부하며 동일 저장소의 중복 실행을 잠급니다. reset/stash/commit은 자동 수행하지 않습니다. Gemini에는 파일을 수정하지 않는 분석을 지시합니다. 이 지시는 강제 쓰기 차단이 아니며 기존 도구 권한과 샌드박스가 적용됩니다.
 
 명시적인 성공 결과를 확인해야 완료로 처리합니다. 논리적 정확성이나 모든 테스트 통과까지 자동 보장하지는 않습니다. Ctrl-C·SIGTERM·SIGHUP는 자식 프로세스 그룹을 종료하고 상태를 보존합니다. 강제 종료(SIGKILL)와 전원 차단은 정리 코드를 실행할 수 없습니다.
 
@@ -128,7 +130,7 @@ Codex에서 일반 대화와 위임 판단에는 Codex 사용량이 듭니다. �
 
 ## 검증
 
-`python3 -m unittest test_router.py`로 20개 오프라인 통합 테스트를 실행합니다. 분류 우선순위, 세 엔진, quota/반복 실패, 권한 거부, 상태 보존, 설치 링크, 재귀 차단, 시간 초과와 중단 및 다른 사용자 경로에 재설치할 때의 설정 보존을 확인합니다. 확인한 CLI 버전은 Codex 0.160.0, Claude Code 2.1.285, Gemini CLI 0.46.0입니다. 실제 Astra와 Opus 응답은 성공했으며, Gemini 계정 거부 후 Claude로 전환되는 것도 확인했습니다.
+`python3 -B -m unittest discover -q`로 가짜 CLI와 임시 저장소를 사용하는 오프라인 테스트를 실행합니다. 분류 우선순위, 세 엔진, quota/반복 실패, 권한 거부, 상태 보존, 설치 링크, 재귀 차단, 시간 초과와 중단 및 다른 사용자 경로에 재설치할 때의 설정 보존을 확인합니다. 확인한 CLI 버전은 Codex 0.160.0, Claude Code 2.1.285, Gemini CLI 0.46.0입니다. 실제 Astra와 Opus 응답은 성공했으며, Gemini 계정 거부 후 Claude로 전환되는 것도 확인했습니다.
 
 공식 참고: [Gemini 모델 별칭](https://geminicli.com/docs/cli/cli-reference/), [Gemini 비대화형 실행](https://geminicli.com/docs/cli/headless/), [Codex 전역 지침](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
 
@@ -174,7 +176,7 @@ GitHub `main`이 배포 기준입니다. 소스 변경은 검토·테스트 후 
 python3 ~/Documents/Codex/TernPilot/update.py --enable
 ```
 
-macOS 로그인 시와 매시간 GitHub를 확인합니다. 새 커밋을 임시 폴더에 받고 테스트가 통과한 경우에만 설치 파일을 갱신합니다. `dev` 또는 채팅 UI가 실행 중이면 갱신을 미루므로 UI를 닫으면 다음 확인 때 적용됩니다. `router.py`/`chat.py`를 직접 실행하지 말고 `dev`를 사용하세요. 설치 코드에 로컬 수정이 있으면 중단합니다.
+macOS 로그인 시와 매시간 GitHub를 확인합니다. 새 커밋을 임시 폴더에 받고 테스트가 통과하면, 별도 로컬 임시 복사본에서 기존 설정과 기존에만 있는 테스트도 검사합니다. 같은 이름의 배포 테스트는 갱신된 테스트를 사용합니다. 두 단계가 모두 통과해야 설치 파일을 갱신합니다. 검증용 HOME과 PATH에는 사용자 계정과 설치된 모델 CLI를 포함하지 않습니다. 대화·로그·인증 파일은 복사하지 않으며 임시 복사본은 검사 후 삭제합니다. `dev` 또는 채팅 UI가 실행 중이면 갱신을 미루므로 UI를 닫으면 다음 확인 때 적용됩니다. `router.py`/`chat.py`를 직접 실행하지 말고 `dev`를 사용하세요. 설치 코드에 로컬 수정이 있으면 중단합니다.
 
 - 인증, `config.json`, `chat-config.json`, 대화 기록, Obsidian 볼트, Headroom 설정은 업데이트 대상이 아닙니다.
 - 적용 실패 시 기존 코드를 복구합니다. 중간에 프로세스가 강제 종료되면 다음 업데이트가 복구하며, 복구 전에는 `dev` 실행을 막습니다.

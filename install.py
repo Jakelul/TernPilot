@@ -14,6 +14,7 @@ FILES = ["dev", "router.py", "planner.py", "start.command", "install.sh", "insta
          "Install TernPilot.command", "config.example.json", "README.md",
          "test_router.py", "codex-global.instructions.txt"]
 FILES += ["update.py", "test_update.py", "LICENSE", "CLOUD_START.md", "chat.py", "usage.py", "quota.py", "test_quota.py", "test_usage.py", "chat.html", "test_chat.py", "chat-config.example.json"]
+FILES += ["assist.py", "control.py", "gemini.py", "job.py", "test_assist.py", "test_control.py", "test_gemini.py", "test_job.py"]
 BEGIN, END = "<!-- DUORELAY:BEGIN -->", "<!-- DUORELAY:END -->"
 
 

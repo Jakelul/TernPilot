@@ -16,7 +16,7 @@ SCHEMA = {
 }
 
 
-def select_worker(task, config, repo, run, execute, outcome, risk, implement, denied):
+def select_worker(task, config, repo, run, execute, outcome, risk, implement, denied, no_fallback=False):
     schema, answer = run / "route.schema.json", run / "route.json"
     schema.write_text(json.dumps(SCHEMA))
     out, err = run / "routing-codex.jsonl", run / "routing-codex.stderr"
@@ -56,8 +56,8 @@ def select_worker(task, config, repo, run, execute, outcome, risk, implement, de
     record.update(exit_code=code, failed=failed, limited=limited, blocked=blocked)
     if failed:
         # A permission denial is never a reason to try another provider.
-        if limited and not blocked:
-            record.update(engine="claude", reason="Astra routing quota/rate limit; strong fallback to Claude")
+        if limited and not blocked and not no_fallback:
+            record.update(engine="claude", reason="Astra routing usage exhausted; strong fallback to Claude")
         else:
             record["reason"] = "Astra routing failed; no worker started. See routing logs."
         return record

@@ -1,5 +1,10 @@
 """Reported tokens from this machine's TernPilot run logs, not account quota."""
+import hashlib
 import json
+import os
+import re
+import tempfile
+import time
 import math
 from pathlib import Path
 
@@ -114,3 +119,100 @@ def history(projects):
                          'status': status, 'engine': task.get('engine') if task.get('engine') in ['codex', 'claude', 'gemini'] else None, 'reports': reports,
                          'time': started})
     return sorted(rows, key=lambda row: row['time'] if isinstance(row['time'], (int,float)) else 0, reverse=True)
+
+
+def events(raw):
+    try:
+        values = [json.loads(raw)]
+    except ValueError:
+        values = []
+        for line in raw.splitlines():
+            try:
+                values.append(json.loads(line))
+            except ValueError:
+                continue
+    return [value for value in values if isinstance(value, dict)]
+
+
+def counters(value, fields):
+    result = {}
+    for target, source in fields.items():
+        number = value.get(source)
+        if type(number) is not int or not 0 <= number <= 10**12:
+            return None
+        result[target] = number
+    return result
+
+
+def usage_records(engine, raw, requested_model):
+    records = []
+    for event in events(raw):
+        if event.get('event') == 'result':
+            event = event.get('result', {})
+        if not isinstance(event, dict):
+            continue
+        models = event.get('modelUsage')
+        if engine == 'claude' and event.get('type') == 'result' and isinstance(models, dict):
+            records = []
+            for model, usage in models.items():
+                if not isinstance(usage, dict):
+                    continue
+                counts = counters(usage, {'inputTokens': 'inputTokens', 'outputTokens': 'outputTokens',
+                    'cacheReadTokens': 'cacheReadInputTokens', 'cacheCreationTokens': 'cacheCreationInputTokens'})
+                if counts is not None:
+                    records.append(dict(counts, model=model, modelSource='reported', totalTokens=sum(counts.values()),
+                                        accounting='입력·출력·캐시 읽기·생성 합계'))
+        elif engine == 'codex' and event.get('type') == 'turn.completed':
+            usage = event.get('usage')
+            counts = counters(usage, {'inputTokens': 'input_tokens', 'outputTokens': 'output_tokens',
+                'cacheReadTokens': 'cached_input_tokens'}) if isinstance(usage, dict) else None
+            if counts is not None and counts['cacheReadTokens'] <= counts['inputTokens']:
+                records = [dict(counts, model=requested_model, modelSource='requested',
+                    totalTokens=counts['inputTokens'] + counts['outputTokens'], accounting='입력(캐시 포함)·출력 합계')]
+        elif engine == 'gemini' and 'status' in event and isinstance(event.get('usage'), dict):
+            counts = counters(event['usage'], {'inputTokens': 'input_tokens', 'outputTokens': 'output_tokens',
+                'cacheReadTokens': 'cache_read_tokens', 'totalTokens': 'total_tokens'})
+            if counts is not None:
+                records = [dict(counts, model=requested_model, modelSource='requested', accounting='Antigravity CLI 제공 합계 · 캐시 별도 필드')]
+        elif engine == 'gemini' and isinstance(event.get('stats'), dict):
+            models = event['stats'].get('models', {})
+            if not isinstance(models, dict):
+                continue
+            records = []
+            for model, value in models.items():
+                usage = value.get('tokens', {}) if isinstance(value, dict) else {}
+                counts = counters(usage, {'inputTokens': 'prompt', 'outputTokens': 'candidates',
+                    'cacheReadTokens': 'cached', 'totalTokens': 'total'}) if isinstance(usage, dict) else None
+                if counts is not None:
+                    records.append(dict(counts, model=model, modelSource='reported', accounting='Gemini CLI 제공 합계'))
+    return [r for r in records if isinstance(r['model'], str)
+            and re.fullmatch(r'[A-Za-z0-9._:/-]{1,120}', r['model']) and r['totalTokens'] > 0]
+
+
+def publish_usage(engine, raw, model, run_id, attempt, observed_at=None, base=None):
+    directory = Path(base) if base is not None else Path.home() / 'Library/Application Support/TokenCat'
+    if not directory.is_dir():
+        return []
+    timestamp = time.time() if observed_at is None else observed_at
+    if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool) or not math.isfinite(timestamp) or timestamp <= 0:
+        raise ValueError('Invalid usage timestamp')
+    directory = directory / 'usage'
+    if directory.is_symlink():
+        raise ValueError('Refusing linked usage directory')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    records = usage_records(engine, raw, model)
+    for record in records:
+        identity = hashlib.sha256(f'{run_id}:{attempt}:{engine}:{record["model"]}'.encode()).hexdigest()
+        record.update(schema=1, id=identity, provider={'claude': 'claude_code', 'codex': 'codex', 'gemini': 'gemini'}[engine],
+                      source='TernPilot CLI', observedAt=timestamp)
+        path = directory / (identity + '.json')
+        if path.is_symlink():
+            raise ValueError('Refusing linked usage receipt')
+        fd, temporary = tempfile.mkstemp(dir=directory, prefix='.receipt-')
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(record, stream, ensure_ascii=False)
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    return records

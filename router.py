@@ -5,15 +5,22 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
+import pwd
 import re
 import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+from assist import check_subscription, claude_environment
+from gemini import GeminiGuardError, gemini_environment, worker_environment as gemini_worker_environment
+from usage import publish_usage
 
 DEFAULT = {
+    "default_engine": "auto",
     "codex_bin": "codex", "claude_bin": "claude", "gemini_bin": "agy",
     "codex_model": "gpt-6-astra", "claude_model": "claude-opus-5-5", "gemini_model": "gemini-4-argon-high",
     "gemini_backend": "agy",
@@ -24,24 +31,112 @@ DEFAULT = {
     "gemini_keywords": ["기획", "아이디어", "요약", "일반 피드백", "브레인스토밍",
                         "planning", "brainstorm", "summarize", "summary", "general feedback"],
 }
-LIMIT = re.compile(r"usage[_ -]?limit|quota|rate[_ -]?limit|too many requests|insufficient_quota|\b429\b", re.I)
+# A transient rate limit, HTTP 429, or a discussion of quota is not exhaustion.
+LIMIT = re.compile(r"\b(?:usage_limit(?:_reached|_exceeded)?|insufficient_quota|"
+                   r"(?:usage[ -]limit|quota)[ _-]+(?:reached|exceeded|exhausted)|"
+                   r"(?:hit|reached|exceeded)[^\n.]{0,40}\busage limit)\b", re.I)
 RISK = re.compile(r"보안|인증|결제|개인정보|데이터.?손실|마이그레이션|운영.?배포|security|auth|payment|privacy|migration|production", re.I)
 IMPLEMENT = re.compile(r"구현|앱.?만들|빌드|개발|수정|리팩터|디버깅|implement|build|develop|refactor|debug|\bfix\b", re.I)
 DENIED = re.compile(r"permission denied|approval[^\n]*denied|user (?:denied|rejected)|sandbox[^\n]*(?:denied|blocked)|requires approval|soft[- ]denied", re.I)
 
 
-def probe(binary, engine="claude", backend="legacy"):
+class ClaudeSubscriptionError(ValueError):
+    """The configured Claude path cannot be confirmed as subscription-only."""
+
+
+def claude_settings_sources(repo):
+    home = Path.home()
+    sources = [("user settings", home / ".claude/settings.json"),
+               ("user local settings", home / ".claude/settings.local.json"),
+               ("cached server-managed settings", home / ".claude/remote-settings.json"),
+               ("project settings", repo / ".claude/settings.json"),
+               ("project local settings", repo / ".claude/settings.local.json")]
+    managed = Path("/Library/Application Support/ClaudeCode")
+    sources.append(("managed settings", managed / "managed-settings.json"))
+    sources.extend(("managed settings fragment", path)
+                   for path in sorted((managed / "managed-settings.d").glob("*.json")))
+    sources.extend(("managed preferences", path) for path in [
+        Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
+        Path("/Library/Managed Preferences") / pwd.getpwuid(os.getuid()).pw_name / "com.anthropic.claudecode.plist",
+        home / "Library/Preferences/com.anthropic.claudecode.plist"])
+    return sources
+
+
+def check_claude_settings(repo):
+    # Inspect only provider/authentication overrides; never echo their values.
+    override_keys = {"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh",
+                     "proxyAuthHelper", "forceLoginMethod", "forceLoginOrgUUID",
+                     "forceLoginGatewayUrl", "gatewayInternalNetworks", "allowedProviders",
+                     "policyHelper", "policyHelpers"}
+    env_prefixes = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "CLAUDE_CODE_OAUTH",
+                    "CLAUDE_CODE_API_KEY", "CLAUDE_CODE_AUTH", "AWS_", "BEDROCK_",
+                    "GOOGLE_", "VERTEX_", "AZURE_", "FOUNDRY_")
+    env_keys = {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}
+    for label, path in claude_settings_sources(repo):
+        try:
+            if not path.exists():
+                continue
+            if path.suffix == ".plist":
+                data = plistlib.loads(path.read_bytes())
+            else:
+                data = json.loads(path.read_text())
+            if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
+                raise ValueError("Invalid settings structure")
+            pending, override = [data], False
+            while pending:
+                value = pending.pop()
+                if isinstance(value, list):
+                    pending.extend(value)
+                elif isinstance(value, dict):
+                    env = value.get("env", {})
+                    if not isinstance(env, dict):
+                        raise ValueError("Invalid settings environment")
+                    override |= bool(override_keys.intersection(value)) or any(
+                        key.upper() in env_keys or key.upper().startswith(env_prefixes) for key in env)
+                    pending.extend(value.values())
+                    if isinstance(value.get("managedSettings"), str):
+                        pending.append(json.loads(value["managedSettings"]))
+        except (OSError, ValueError, AttributeError, plistlib.InvalidFileException) as error:
+            raise ClaudeSubscriptionError(f"Claude {label} could not be inspected; no request sent") from error
+        if override:
+            raise ClaudeSubscriptionError(
+                f"Claude {label} contain an authentication/provider override; no request sent")
+
+
+def claude_worker_environment(binary, repo):
+    env = claude_environment()
+    check_claude_settings(repo)
     try:
-        version = subprocess.run([binary, "--help" if engine == "gemini" and backend == "agy" else "--version"], capture_output=True, text=True, timeout=15)
+        with tempfile.TemporaryDirectory(prefix="ternpilot-auth-") as work:
+            check_subscription(binary, env, work)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        raise ClaudeSubscriptionError(
+            "Existing Claude Pro/Max subscription login could not be confirmed; no request sent") from error
+    # Delegated implementation keeps normal project tools, hooks and approvals.
+    # Safe mode is used only for the isolated, settings-disabled auth preflight.
+    env.pop("CLAUDE_CODE_SAFE_MODE", None)
+    return env
+
+
+def supports_antigravity(help_text):
+    return bool(re.search(r"(?<![\w-])--mode(?![\w-])", help_text) and "--input-format" in help_text)
+
+
+def probe(binary, engine="claude", backend="agy"):
+    if engine == "gemini" and backend != "agy":
+        raise GeminiGuardError("Gemini requires the supported Antigravity account path; no task sent")
+    env = gemini_environment() if engine == "gemini" else None
+    try:
+        version = subprocess.run([binary, "--help" if engine == "gemini" and backend == "agy" else "--version"], capture_output=True, text=True, timeout=15, env=env)
         help_result = subprocess.run([binary, "exec", "--help"] if engine == "codex" else [binary, "--help"],
-                                     capture_output=True, text=True, timeout=15)
+                                     capture_output=True, text=True, timeout=15, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ValueError(f"CLI unavailable: {binary}: {e}") from e
     required = {"codex": ["--model", "--json", "--sandbox", "--config"],
                 "claude": ["--model", "--output-format", "--permission-mode", "--effort"],
                 "gemini": ["--model", "--output-format", "--approval-mode", "--prompt"]}[engine]
     if engine == "gemini" and backend == "agy":
-        required = ["--model", "--effort", "--mode", "--sandbox", "--input-format", "--output-format", "--disable-slash-commands"]
+        required = ["--model", "--effort", "--mode", "--sandbox", "--input-format", "--output-format", "--disable-slash-commands", "--print"]
     help_text = help_result.stdout + help_result.stderr
     if version.returncode or help_result.returncode or any(x not in help_text for x in required):
         raise ValueError(f"Unsupported CLI options: {binary}; required: {required}")
@@ -83,8 +178,8 @@ def atomic(path, data):
         temp.unlink(missing_ok=True)
 
 
-def outcome(engine, code, stdout, stderr, backend="legacy"):
-    errors, messages = [], []
+def outcome(engine, code, stdout, stderr, backend="agy"):
+    errors, messages, plain_output = [], [], []
     completed = False
     try:
         events = [json.loads(stdout)]
@@ -94,6 +189,7 @@ def outcome(engine, code, stdout, stderr, backend="legacy"):
         try:
             obj = json.loads(line) if isinstance(line, str) else line
         except ValueError:
+            plain_output.append(line)
             continue
         if not isinstance(obj, dict):
             continue
@@ -134,9 +230,13 @@ def outcome(engine, code, stdout, stderr, backend="legacy"):
         messages.append(errors[-1])
     if errors:
         messages.extend(errors)
+    if engine == "gemini" and DENIED.search(stderr):
+        errors.append("Gemini CLI reported a tool permission/approval denial")
     failed = code != 0 or bool(errors)
-    # Only error events or failed-process output trigger quota fallback.
-    evidence = "\n".join(errors) + (stderr + stdout if code != 0 else "")
+    # Agent prose is not evidence of provider exhaustion.
+    evidence = "\n".join(errors) + "\n" + stderr
+    if code != 0:
+        evidence += "\n" + "\n".join(plain_output)
     return failed, bool(failed and LIMIT.search(evidence)), "\n".join(messages)[-16000:]
 
 
@@ -153,7 +253,11 @@ def agy_canceled(stdout):
     return False
 
 
-def execute(command, prompt, repo, out, err, timeout):
+def execute(command, prompt, repo, out, err, timeout, engine=None):
+    env = (claude_worker_environment(command[0], repo) if engine == "claude"
+           else gemini_worker_environment(command[0], command[command.index("--model") + 1], repo) if engine == "gemini"
+           else dict(os.environ, DUORELAY_CHILD="1"))
+    env["CLAUDE_CODE_DISABLE_FAST_MODE"] = "1"
     if "--input-format" in command and command[command.index("--input-format") + 1] == "stream-json":
         prompt = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
     with out.open("x") as stdout, err.open("x") as stderr:
@@ -161,7 +265,7 @@ def execute(command, prompt, repo, out, err, timeout):
         os.chmod(err, 0o600)
         process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE,
                                    stdout=stdout, stderr=stderr, text=True, start_new_session=True,
-                                   env=dict(os.environ, DUORELAY_CHILD="1", CLAUDE_CODE_DISABLE_FAST_MODE="1"))
+                                   env=env)
         try:
             process.communicate(prompt, timeout=timeout)
             return process.returncode
@@ -178,33 +282,20 @@ def execute(command, prompt, repo, out, err, timeout):
             raise
 
 
-def main():
-    def interrupt(_signum, _frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, interrupt)
-    signal.signal(signal.SIGHUP, interrupt)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task", nargs="?")
-    parser.add_argument("--repo", default=".")
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--engine", choices=["auto", "codex", "claude", "gemini"], default="auto")
-    parser.add_argument("--dry-run", action="store_true", help="Probe and show route; no files or paid calls")
-    parser.add_argument("--doctor", action="store_true")
-    parser.add_argument("--routing", choices=["astra", "rules"], default="astra",
-                        help="Use Astra to select the worker (default), or legacy keyword rules")
-    parser.add_argument("--plan-only", action="store_true", help="Run paid routing only; do not start a worker")
-    args = parser.parse_args()
+def load_config(path=None):
     config = DEFAULT.copy()
-    config_path = args.config or Path(__file__).with_name("config.json")
-    if args.config or config_path.exists():
-        supplied = json.loads(config_path.read_text())
+    explicit = path is not None
+    path = Path(path) if explicit else Path(__file__).with_name("config.json")
+    if explicit or path.exists():
+        supplied = json.loads(path.read_text())
         if not isinstance(supplied, dict) or set(supplied) - set(DEFAULT):
             raise ValueError("Unknown configuration keys")
         config.update(supplied)
     for key in ["codex_bin", "claude_bin", "gemini_bin", "codex_model", "claude_model", "gemini_model"]:
         if not isinstance(config[key], str) or not config[key]:
             raise ValueError(f"Invalid {key}")
+    if config["default_engine"] not in ("auto", "codex", "claude", "gemini"):
+        raise ValueError("Invalid default_engine")
     if type(config["codex_attempts"]) is not int or not 1 <= config["codex_attempts"] <= 5:
         raise ValueError("codex_attempts must be 1..5")
     if type(config["timeout_seconds"]) is not int or config["timeout_seconds"] <= 0:
@@ -216,6 +307,29 @@ def main():
     for key in ["claude_keywords", "gemini_keywords"]:
         if not isinstance(config[key], list) or any(not isinstance(x, str) or not x for x in config[key]):
             raise ValueError(f"{key} must contain nonempty strings")
+    return config
+
+
+def main():
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGHUP, interrupt)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("task", nargs="?")
+    parser.add_argument("--repo", default=".")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--engine", choices=["auto", "codex", "claude", "gemini"],
+                        help="Override default_engine from config (otherwise auto)")
+    parser.add_argument("--dry-run", action="store_true", help="Probe and show route; no files or paid calls")
+    parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--no-fallback", action="store_true", help="Stop if the selected engine fails")
+    parser.add_argument("--routing", choices=["astra", "rules"], default="astra",
+                        help="Use Astra to select the worker (default), or legacy keyword rules")
+    parser.add_argument("--plan-only", action="store_true", help="Run paid routing only; do not start a worker")
+    args = parser.parse_args()
+    config = load_config(args.config)
     if args.doctor:
         for engine in ["codex", "claude", "gemini"]:
             print(engine, probe(config[engine + "_bin"], engine, config["gemini_backend"])[0])
@@ -230,8 +344,9 @@ def main():
         repo = Path(git(Path(args.repo).resolve(), "rev-parse", "--show-toplevel"))
     except subprocess.CalledProcessError as e:
         raise ValueError("--repo must be an existing Git working tree") from e
-    engine, reason = route(args.task, config) if args.engine == "auto" else (args.engine, "explicit selection")
-    use_planner = args.engine == "auto" and args.routing == "astra"
+    selected = args.engine or config["default_engine"]
+    engine, reason = route(args.task, config) if selected == "auto" else (selected, "explicit selection" if args.engine else "configured default")
+    use_planner = selected == "auto" and args.routing == "astra"
     version, help_text = probe(config[("codex" if use_planner else engine) + "_bin"],
                                "codex" if use_planner else engine, config["gemini_backend"])
     if use_planner and any(flag not in help_text for flag in ["--output-schema", "--output-last-message"]):
@@ -261,7 +376,8 @@ def main():
         else:
             print(f"Route: {engine} ({reason}); {version}")
             print(shlex.join(command(engine, help_text)))
-        print(f"Repo: {repo}; fallback: untried Claude/Codex; Codex attempts: {config['codex_attempts']}; Gemini is read-only")
+        fallback = "disabled" if args.no_fallback else "usage exhaustion only, to untried Claude/Codex"
+        print(f"Repo: {repo}; fallback: {fallback}; Codex attempts: {config['codex_attempts']}; Gemini requests analysis only; normal tool permissions and sandbox apply")
         return 0
     ai = repo / ".ai"
     if ai.is_symlink():
@@ -297,7 +413,7 @@ def main():
         from planner import select_worker
         print("Planning: Astra; worker not started (this uses Codex usage).", flush=True)
         try:
-            selection = select_worker(args.task, config, repo, run, execute, outcome, RISK, IMPLEMENT, DENIED)
+            selection = select_worker(args.task, config, repo, run, execute, outcome, RISK, IMPLEMENT, DENIED, no_fallback=args.no_fallback)
         except KeyboardInterrupt:
             state["status"] = "interrupted"
             atomic(ai / "HANDOFF.json", state)
@@ -354,7 +470,12 @@ def main():
         out, err = run / f"{attempts}-{engine}.jsonl", run / f"{attempts}-{engine}.stderr"
         print(f"Attempt {attempts}: {engine}; logs: {run}", flush=True)
         try:
-            code = execute(command(engine, help_text), prompt, repo, out, err, config["timeout_seconds"])
+            code = execute(command(engine, help_text), prompt, repo, out, err, config["timeout_seconds"], engine)
+        except (ClaudeSubscriptionError, GeminiGuardError) as error:
+            state.update(status="blocked", reason=str(error))
+            atomic(ai / "HANDOFF.json", state)
+            print(str(error), file=sys.stderr)
+            return 2
         except KeyboardInterrupt:
             state["status"] = "interrupted"
             atomic(ai / "HANDOFF.json", state)
@@ -375,16 +496,21 @@ def main():
                   "summary": summary, "failure_tail": (stderr + stdout)[-8000:] if failed else "",
                   "stdout": str(out), "stderr": str(err), "time": time.time()}
         state["attempts"].append(record)
+        try:
+            record["usage"] = publish_usage(engine, stdout, config[engine + "_model"], run_id, attempts, record["time"])
+        except Exception as error:
+            record["usage_error"] = str(error)
+            print(f"Token Cat receipt unavailable: {error}", file=sys.stderr)
         with (ai / "history.jsonl").open("a") as f:
             os.chmod(ai / "history.jsonl", 0o600)
             f.write(json.dumps({"run_id": run_id, **record}, ensure_ascii=False) + "\n")
         tried = {a["engine"] for a in state["attempts"]}
         codex_tries = sum(a["engine"] == "codex" for a in state["attempts"])
         next_engine = None
-        if failed and not blocked:
+        if failed and not blocked and not args.no_fallback:
             if engine == "codex" and not limited and codex_tries < config["codex_attempts"]:
                 next_engine = "codex"
-            else:
+            elif limited:
                 next_engine = next((e for e in ["claude", "codex"] if e not in tried), None)
         if canceled:
             state.update(status="interrupted", reason="Antigravity canceled; no cross-engine retry")
@@ -395,7 +521,7 @@ def main():
         elif next_engine is None:
             state["status"] = "failed"
         else:
-            state["reason"] = "quota/rate limit" if limited else "repeated execution failure"
+            state["reason"] = "usage exhausted" if limited else "retry same engine after execution failure"
         atomic(ai / "HANDOFF.json", state)
         if state["status"] != "running":
             print(summary or stderr[-2000:] or stdout[-2000:])

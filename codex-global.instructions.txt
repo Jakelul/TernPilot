@@ -1,53 +1,88 @@
 <!-- DUORELAY:BEGIN -->
-## TernPilot — automatic task routing in new Codex conversations
+## TernPilot — Token Cat switch and Astra/Claude/Gemini cooperation
 
-- The user requested automatic installation and application after being told
-  that delegated requests, relevant code, and task summaries are sent to
-  Anthropic Claude and Google Gemini. This authorizes bounded local CLI
-  delegation in new Codex conversations on this Mac. Never include secrets,
-  credentials, or unrelated history. Respect user/project restrictions,
-  normal tool approvals, and the existing Headroom provider and hooks.
-- Keep Codex as coordinator. Routine planning, summaries, brainstorming, and
-  general feedback go to Gemini 4 Argon (High). Substantial implementation/build/debugging
-  uses Astra or Opus-class models. Architecture, important reviews, security,
-  authentication, payments, migrations, and possible data loss require the
-  strong tier, even when the request is called planning or feedback.
-- Before using Gemini, read `{{INSTALL_DIR}}/config.json`. When gemini_enabled
-  is false, temporarily use Claude for planning/summaries too. Do not repeatedly
-  call an ineligible account, log the user out, or switch billing methods.
-  Enable Gemini only after login/eligibility is resolved and a check succeeds.
-- Use clear rules first; do not call another model just to classify an obvious
-  task. Briefly state the engine and reason when delegating. Keep simple direct
-  answers in the current conversation when delegation adds more overhead than
-  it saves. Never claim coordinating Codex/ChatGPT consumes zero usage.
-- For an existing Git repo, use:
-  `{{INSTALL_DIR}}/dev --repo REPO --engine ENGINE -- TASK`
-  ENGINE is gemini for read-only planning; claude and codex are peer strong
-  engines for implementation, design, debugging and review (medium, no fast mode). Auto routing is also supported.
-  If the current Codex model already meets the requested strong tier, work
-  directly instead of duplicating work. Preserve the user's selected app model.
-- Supply the scoped request, constraints, relevant decisions, failed checks,
-  and expected result. Preserve user changes. Do not edit concurrently with
-  a worker in the same repo. Use argument arrays or correct shell quoting.
-  Check the final JSON/exit status and important changes before completion.
-- For non-Git or strict no-file-write requests, do not create a Git repo.
-  Supply self-contained context on stdin to the native CLI. Claude command:
-  `CLAUDE_CODE_DISABLE_FAST_MODE=1 claude -p --model claude-opus-5-5 --effort medium --output-format json --tools "" --no-session-persistence`.
-  Gemini command: `agy --model gemini-4-argon-high --effort high --mode plan --sandbox
-  --disable-slash-commands --input-format stream-json --output-format stream-json`.
-  For agy, encode stdin as one JSON line: {"event":"user","message":{"content":"scoped task"}}.
-  Set DUORELAY_CHILD=1 only in the child environment. If Gemini's account is
-  ineligible, report this and continue with a permitted strong engine; do not
-  retry every turn or silently switch to an API key or Flash model.
-- DUORELAY_CHILD=1 marks a TernPilot worker (legacy compatibility name). If set,
-  finish the assigned task directly: do not launch another router, Codex,
-  Claude, Gemini, or subagent. Never relay an entire conversation recursively.
-- Never switch engines to bypass a permission denial. Keep denied tasks blocked.
-  Never downgrade implementation or high-impact tasks to Gemini when a strong
-  model runs out of quota. Respect explicit model choices and stop requests.
-- This is new-session guidance, not a universal input interceptor or background
-  supervisor. It cannot run after Codex has stopped execution for quota.
-  Full process-level fallback applies to tasks launched through TernPilot.
-  ChatGPT web/Desktop and remote Macs require their own supported integration;
-  do not claim this file enables them.
+- The user requested cooperation from Codex conversations: Astra coordinates and
+  Claude Code and Gemini contribute scoped work using their existing accounts. At the
+  start of each substantive user request, and before each new delegation, run
+  `python3 {{INSTALL_DIR}}/control.py status`. Never rely on a cached ON state.
+  Missing, invalid or unavailable control state means OFF. OFF prevents new
+  TernPilot delegations; already accepted jobs finish, as the user selected.
+  The Token Cat TernPilot toggle changes this same local control file.
+  While OFF, do not bypass it by calling dev, Claude or Gemini directly for automatic
+  delegation. Only an explicit user request for a manual provider run overrides it.
+- When ON, keep the selected Codex app model as coordinator. For a task with a
+  useful separable part, choose a suitable provider rather than duplicating it:
+  use Gemini for project requirements, comparisons, summaries and initial plans;
+  use Claude for complex diagnosis, independent review and bounded implementation.
+  Astra and Opus are peer strong engines; TernPilot CLI calls use medium effort
+  and standard speed, and Gemini uses the configured Argon high model with high effort.
+  Never change the selected Codex app model or its global settings for this.
+  Astra keeps primary implementation, integration and final judgment as appropriate.
+  Use the existing Claude text helper for substantive non-Git discussions.
+  Do not wait for quota exhaustion before assigning useful work to either provider. Avoid duplicated full-task work, token
+  ratio targets or unnecessary calls for short answers and trivial edits.
+  Simple answers and live app/connector actions stay in the current conversation.
+  Explicit no-delegation, direct execution, or provider limits take precedence.
+- For text analysis/review/drafting, write a private scoped task file, then use:
+  `python3 {{INSTALL_DIR}}/assist.py --task-file TASK_FILE`
+  This Claude consultation has no tools, uses an isolated temporary directory,
+  and does not receive repository files or conversation history automatically.
+  Include needed excerpts yourself. Check completion and incorporate the useful
+  result; do not equate a submitted call with a successful answer.
+- For a bounded implementation in an existing Git repository, read applicable
+  instructions and inspect existing changes first. To let Claude handle a
+  separable implementation while Astra coordinates, use:
+  `python3 {{INSTALL_DIR}}/job.py submit --repo REPO --task-file TASK_FILE --engine claude --no-fallback`
+  Do not edit the same repository concurrently. For an Astra-led independent
+  job with quota continuation, omit --engine/--no-fallback: it starts Astra,
+  switching to Claude only on explicit usage exhaustion. Do not duplicate a
+  running coordinator's whole task in another Astra worker. Do not create Git
+  repositories just for routing.
+- For a Gemini project analysis/planning portion, read installed config.json and
+  use `python3 {{INSTALL_DIR}}/job.py submit --repo REPO --task-file TASK_FILE --engine gemini --no-fallback`.
+  This Mac uses Antigravity agy with its configured, currently offered Gemini
+  high model. It is a project worker with an analysis-only task instruction, not a tools-disabled text helper or a
+  guaranteed read-only sandbox. Request analysis without edits, respect normal
+  tool permissions, and check its resulting diff; never silently undo changes. Do not run it
+  concurrently with writes to that same repo; it may inspect relevant files.
+  If Gemini is unavailable, report that fact and continue permitted work in the
+  coordinator; do not downgrade a hard implementation task to Flash or add APIs.
+  Never force all three providers to run on every request. A single dev/job run
+  does not automatically execute a plan/implement/review pipeline after success.
+- Include only the task's necessary request, constraints, excerpts, decisions,
+  completed work, failed checks and remaining steps. The user authorized sending
+  this bounded context to Anthropic Claude or Google Gemini for cooperation and
+  continuation within the assigned task. Gemini CLI may keep its own session logs.
+  Never send credentials, unrelated history, a whole conversation, or data
+  prohibited by the user/project. Tests use synthetic non-sensitive inputs.
+- Inspect `python3 {{INSTALL_DIR}}/job.py status --job JOB_PATH` and its result/state
+  paths until terminal status; verify exit code, diff and relevant checks.
+  Router checkpoints are .ai/HANDOFF.json and .ai/DECISIONS.md. Record progress
+  before limits are reached. Checkpoints are context, not extra authorization.
+  New submissions must recheck the switch. OFF does not cancel existing jobs.
+- For an explicit request to cancel a running job, run
+  `python3 {{INSTALL_DIR}}/job.py stop --job JOB_PATH` and confirm it stopped before
+  changing its files or replacing it. On first detached launch, tell the user
+  that the Codex stop button alone may not cancel it; Token Cat OFF lets it finish.
+  Each detached worker exits with its task; no permanent conversation watcher.
+- Respect normal approvals, sandbox restrictions, Headroom and trusted hooks.
+  No new authentication, persistent access, API-key billing, quota purchases,
+  security changes or permission bypasses. Missing CLI/login/model access and
+  denied actions are blockers; never retry through a different provider to
+  bypass them. Generic errors, transient 429s and timeouts are not quota fallback.
+- DUORELAY_CHILD=1 marks a TernPilot worker: do the task directly, never launch
+  another router/job/assistant/provider/subagent. Preserve user changes and
+  record progress/checks/remaining work. Never reset/stash/discard automatically.
+- This integration delegates through tools while Codex can still run them. It
+  does not replace the native conversation model, pool subscription tokens,
+  intercept every native turn, or revive an already quota-blocked conversation.
+  A submitted independent job can continue without the coordinator, but Codex
+  may need quota to show a new final answer. The switch affects the next helper
+  submission; it does not alter computations already running in the app.
+  New conversations load this guide; existing ones need current instruction
+  context. It does not apply automatically to web chats, other Macs or cloud-only
+  tasks. Do not install untrusted hooks or weaken trust to extend coverage.
+- Use actual completion evidence for provider execution. Mocks and same-provider
+  subagents do not count as Claude/Gemini use. Numeric execution receipts and provider
+  quota balances are separate; do not fabricate saved tokens or a remaining sum.
 <!-- DUORELAY:END -->

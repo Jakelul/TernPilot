@@ -76,6 +76,42 @@ def recover(root):
     if backup.exists():
         shutil.rmtree(backup)
 
+def offline_environment(home):
+    # Tests get no account home, provider variables or installed CLI search path.
+    return {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
+
+def test_snapshot(source):
+    with tempfile.TemporaryDirectory(prefix="ternpilot-test-home-") as home:
+        run(sys.executable, "-B", "-m", "unittest", "discover", "-q", cwd=source,
+            env=offline_environment(home))
+
+def validate_installation(source, root):
+    # Copy code and local config only; chats, logs and credentials never enter staging.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("release_install", source / "install.py")
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    with tempfile.TemporaryDirectory(prefix="ternpilot-compat-") as temp:
+        stage = Path(temp) / "runtime"
+        stage.mkdir(mode=0o700)
+        names = {p.name for p in root.glob("*.py")} | {"dev", "config.json"}
+        for name in names:
+            path = root / name
+            if path.is_symlink():
+                raise ValueError("Linked installed code/config; update deferred")
+            if path.is_file():
+                shutil.copy2(path, stage / name)
+        for name in installer.FILES:
+            if Path(name).name != name or not (source / name).is_file() or (source / name).is_symlink():
+                raise ValueError("Invalid release manifest")
+            shutil.copy2(source / name, stage / name)
+        # Validate preserved config without probes, authentication or worker calls.
+        home = Path(temp) / "home"
+        home.mkdir(mode=0o700)
+        run(sys.executable, "-B", "-c", "import router; router.load_config()", cwd=stage, env=offline_environment(home))
+        # Unshipped installed tests stay here alongside the release's updated fixtures.
+        run(sys.executable, "-B", "-m", "unittest", "discover", "-q", cwd=stage, env=offline_environment(home))
+
 def update(root):
     if root.is_symlink() or not (root / ".ternpilot-install.json").is_file():
         raise ValueError("Not a managed installation")
@@ -94,7 +130,8 @@ def update(root):
             if state.exists() and json.loads(state.read_text()).get("revision") == revision:
                 print("Already current: " + revision[:12])
                 return
-            run(sys.executable, "-m", "unittest", "discover", "-q", cwd=source)
+            test_snapshot(source)
+            validate_installation(source, root)
             apply(source, root, revision)
             print("Updated: " + revision[:12], flush=True)
 

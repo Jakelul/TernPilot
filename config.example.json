@@ -1,4 +1,5 @@
 {
+  "default_engine": "auto",
   "codex_bin": "codex",
   "claude_bin": "claude",
   "gemini_bin": "agy",

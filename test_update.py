@@ -2,6 +2,7 @@ import fcntl
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 import update
@@ -66,6 +67,55 @@ class UpdateTests(unittest.TestCase):
         (self.root / 'app.py').symlink_to(self.root / 'config.json')
         with self.assertRaises(ValueError):
             update.apply(self.source, self.root, '123')
+
+    def test_staging_retains_unshipped_tests_and_excludes_private_data(self):
+        (self.root / 'test_retained.py').write_text('import unittest\nclass Retained(unittest.TestCase):\n def test_removed_api(self):\n  import app\n  self.assertTrue(hasattr(app, "retained_api"))\n')
+        (self.root / 'chat-config.json').write_text('{"vault":"private"}')
+        (self.root / 'chats').mkdir()
+        (self.root / 'chats/private.json').write_text('private conversation')
+        (self.source / 'router.py').write_text('def load_config(): pass\n')
+        (self.source / 'app.py').write_text('new_api = True\n')
+        (self.source / 'install.py').write_text('FILES=["app.py", "router.py"]\n')
+        stages = []
+        original = update.run
+        def checked_run(*args, **kwargs):
+            stage = kwargs['cwd']
+            stages.append(stage)
+            self.assertFalse((stage / 'chats').exists())
+            self.assertFalse((stage / 'chat-config.json').exists())
+            self.assertEqual((stage / 'config.json').read_text(), '{"private":true}')
+            self.assertNotEqual(kwargs['env']['HOME'], str(Path.home()))
+            self.assertNotIn('/opt/homebrew/bin', kwargs['env']['PATH'])
+            return original(*args, capture_output=True, **kwargs)
+        with patch.object(update, 'run', side_effect=checked_run):
+            with self.assertRaises(subprocess.CalledProcessError):
+                update.validate_installation(self.source, self.root)
+        self.assertTrue(stages)
+        self.assertTrue(all(not p.exists() for p in stages))
+        self.assertEqual((self.root / 'app.py').read_text(), 'old')
+        self.assertFalse((self.root / '.update-state.json').exists())
+
+    def test_staging_checks_current_config_before_tests(self):
+        (self.source / 'router.py').write_text('def load_config(): raise ValueError("incompatible config")\n')
+        (self.source / 'install.py').write_text('FILES=["app.py", "router.py"]\n')
+        original = update.run
+        with patch.object(update, 'run', side_effect=lambda *a, **kw: original(*a, capture_output=True, **kw)) as called:
+            with self.assertRaises(subprocess.CalledProcessError):
+                update.validate_installation(self.source, self.root)
+            self.assertEqual(called.call_count, 1)
+        self.assertEqual((self.root / 'config.json').read_text(), '{"private":true}')
+
+    def test_failed_staging_prevents_apply(self):
+        def fake_run(*args, **kwargs):
+            if args[:2] == ('git', 'clone'):
+                Path(args[-1]).mkdir()
+            return subprocess.CompletedProcess(args, 0, stdout='123\n')
+        with patch.object(update, 'run', side_effect=fake_run), patch.object(update, 'test_snapshot'), \
+                patch.object(update, 'validate_installation', side_effect=ValueError('incompatible')), \
+                patch.object(update, 'apply') as apply:
+            with self.assertRaisesRegex(ValueError, 'incompatible'):
+                update.update(self.root)
+            apply.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
