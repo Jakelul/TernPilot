@@ -8,6 +8,7 @@ import subprocess
 import threading
 import tempfile
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import time
 from pathlib import Path
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -89,24 +90,43 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class QuotaError(Exception):
+    def __init__(self, code, retry_after=None):
+        super().__init__(code)
+        self.code = code
+        self.retry_after = retry_after
+
+
+def retry_after_seconds(value):
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        try:
+            seconds = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0, seconds) if math.isfinite(seconds) else None
+
+
 def read_claude():
     # Use the existing CLI login; never copy its token to application storage.
     result = subprocess.run(['/usr/bin/security','find-generic-password','-s','Claude Code-credentials','-w'], capture_output=True, text=True, timeout=15)
     if result.returncode:
-        raise ValueError('Claude login credentials unavailable')
+        raise QuotaError('auth_required')
     try:
         credentials = json.loads(result.stdout).get('claudeAiOauth', {})
     except ValueError:
-        raise ValueError('Claude credentials unreadable') from None
+        raise QuotaError('auth_required') from None
     token = credentials.get('accessToken')
     if not isinstance(token,str) or not token:
-        raise ValueError('Claude OAuth login unavailable')
+        raise QuotaError('auth_required')
     req = Request('https://api.anthropic.com/api/oauth/usage', headers={'Authorization':'Bearer '+token,'anthropic-beta':'oauth-2025-04-20','User-Agent':'TernPilot/0.1'})
     try:
         with build_opener(NoRedirect).open(req, timeout=15) as response:
             data = json.load(response)
     except HTTPError as error:
-        raise ValueError('Claude usage endpoint returned HTTP ' + str(error.code)) from None
+        code = 'rate_limited' if error.code == 429 else 'auth_required' if error.code == 401 else 'access_denied' if error.code == 403 else 'unavailable'
+        raise QuotaError(code, retry_after_seconds(error.headers.get('Retry-After'))) from None
     window = data.get('seven_day')
     if not isinstance(window,dict):
         raise ValueError('Claude did not report a 7-day window')
@@ -158,6 +178,7 @@ class QuotaMonitor:
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.threads = []
+        self.failures = {}
         self.values = {engine:{'remaining':None,'status':'확인 중','checked_at':None} for engine in ['codex','claude']}
         self.values['gemini'] = {'remaining':None,'status':'Argon 주간 한도 조회 중','checked_at':None}
 
@@ -171,19 +192,44 @@ class QuotaMonitor:
             return values
 
     def refresh(self, engine, fetch):
+        now = time.time()
         try:
-            value = dict(fetch(), status='연결됨', checked_at=time.time())
-        except Exception:
-            # Do not surface subprocess/HTTP text that might contain credentials.
-            value = {'remaining':None,'status':('Argon 한도 조회 실패 · 자동 재시도 중' if engine == 'gemini' else '조회 실패 · 로그인 또는 한도 API 확인 필요'),'checked_at':time.time()}
+            value = dict(fetch(), status='연결됨', state='connected', checked_at=now,
+                         last_success_at=now)
+            self.failures[engine] = 0
+            delay = max(300, self.interval) if engine == 'claude' else self.interval
+        except Exception as error:
+            # Only fixed messages reach the browser; errors can contain credentials.
+            code = error.code if isinstance(error, QuotaError) else 'unavailable'
+            with self.lock:
+                same_error = self.values[engine].get('state') == code
+            count = min(self.failures.get(engine, 0) + 1, 7) if same_error else 1
+            self.failures[engine] = count
+            messages = {
+                'rate_limited': '사용량 서버 요청 제한 · 자동 재연결 대기',
+                'auth_required': '로그인 확인 필요 · 기존 인증 자동 재확인 중',
+                'access_denied': '사용량 접근 거부 · 계정 권한 확인 필요',
+                'unavailable': '일시적인 조회 실패 · 자동 재연결 중',
+            }
+            base = 300 if code in ('rate_limited', 'auth_required', 'access_denied') else 15
+            delay = base if code in ('auth_required', 'access_denied') else min(900, base * 2 ** (count - 1))
+            if isinstance(error, QuotaError) and error.retry_after is not None:
+                # Never retry earlier than the provider permits, even above our cap.
+                delay = max(delay, error.retry_after)
+            with self.lock:
+                last_success = self.values[engine].get('last_success_at')
+            value = dict(remaining=None, status=messages.get(code, messages['unavailable']),
+                         state=code, checked_at=now, last_success_at=last_success)
+        value['next_check_at'] = time.time() + delay
         with self.lock:
             self.values[engine] = value
+        return delay
 
     def start(self):
         def loop(engine, fetch):
             while not self.stop.is_set():
-                self.refresh(engine, fetch)
-                self.stop.wait(self.interval if self.snapshot()[engine]["remaining"] is not None else max(300, self.interval))
+                delay = self.refresh(engine, fetch)
+                self.stop.wait(delay)
         for engine, fetch in [('codex',read_codex),('claude',read_claude),('gemini',read_argon)]:
             worker = threading.Thread(target=loop,args=(engine,fetch),daemon=True)
             self.threads.append(worker)
