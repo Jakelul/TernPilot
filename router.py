@@ -35,6 +35,7 @@ DEFAULT = {
 LIMIT = re.compile(r"\b(?:usage_limit(?:_reached|_exceeded)?|insufficient_quota|"
                    r"(?:usage[ -]limit|quota)[ _-]+(?:reached|exceeded|exhausted)|"
                    r"(?:hit|reached|exceeded)[^\n.]{0,40}\busage limit)\b", re.I)
+TRANSIENT = re.compile(r"\b429\b|rate[_ -]?limit|too many requests|resource_exhausted|\bper[ -](?:minute|second)\b", re.I)
 RISK = re.compile(r"보안|인증|결제|개인정보|데이터.?손실|마이그레이션|운영.?배포|security|auth|payment|privacy|migration|production", re.I)
 IMPLEMENT = re.compile(r"구현|앱.?만들|빌드|개발|수정|리팩터|디버깅|implement|build|develop|refactor|debug|\bfix\b", re.I)
 DENIED = re.compile(r"permission denied|approval[^\n]*denied|user (?:denied|rejected)|sandbox[^\n]*(?:denied|blocked)|requires approval|soft[- ]denied", re.I)
@@ -181,6 +182,7 @@ def atomic(path, data):
 def outcome(engine, code, stdout, stderr, backend="agy"):
     errors, messages, plain_output = [], [], []
     completed = False
+    structured = False
     try:
         events = [json.loads(stdout)]
     except ValueError:
@@ -193,6 +195,7 @@ def outcome(engine, code, stdout, stderr, backend="agy"):
             continue
         if not isinstance(obj, dict):
             continue
+        structured = True
         if engine == "gemini" and backend == "agy":
             if obj.get("event") != "result":
                 continue
@@ -232,12 +235,13 @@ def outcome(engine, code, stdout, stderr, backend="agy"):
         messages.extend(errors)
     if engine == "gemini" and DENIED.search(stderr):
         errors.append("Gemini CLI reported a tool permission/approval denial")
+        messages.append(errors[-1])
     failed = code != 0 or bool(errors)
     # Agent prose is not evidence of provider exhaustion.
     evidence = "\n".join(errors) + "\n" + stderr
-    if code != 0:
+    if code != 0 and not structured:
         evidence += "\n" + "\n".join(plain_output)
-    return failed, bool(failed and LIMIT.search(evidence)), "\n".join(messages)[-16000:]
+    return failed, bool(failed and LIMIT.search(evidence) and not TRANSIENT.search(evidence)), "\n".join(messages)[-16000:]
 
 
 def agy_canceled(stdout):
@@ -302,8 +306,8 @@ def load_config(path=None):
         raise ValueError("timeout_seconds must be positive")
     if type(config["gemini_enabled"]) is not bool:
         raise ValueError("gemini_enabled must be true or false")
-    if config["gemini_backend"] not in ["agy", "legacy"]:
-        raise ValueError("gemini_backend must be agy or legacy")
+    if config["gemini_backend"] != "agy":
+        raise ValueError("gemini_backend must be agy; legacy Gemini accounts are not supported")
     for key in ["claude_keywords", "gemini_keywords"]:
         if not isinstance(config[key], list) or any(not isinstance(x, str) or not x for x in config[key]):
             raise ValueError(f"{key} must contain nonempty strings")

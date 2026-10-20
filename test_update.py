@@ -37,8 +37,12 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.root / 'app.py').read_text(), 'user edit')
 
     def test_failed_write_rolls_back(self):
-        (self.source / 'install.py').write_text('FILES=["app.py"]\ndef write(path,text,mode=0o600):\n    if path.name == ".update-state.json": raise OSError("disk full")\n    path.write_text(text)\n')
-        with self.assertRaises(OSError):
+        original = update.write
+        def fail_state(path, *args):
+            if path.name == '.update-state.json':
+                raise OSError('disk full')
+            return original(path, *args)
+        with patch.object(update, 'write', side_effect=fail_state), self.assertRaises(OSError):
             update.apply(self.source, self.root, '123')
         self.assertEqual((self.root / 'app.py').read_text(), 'old')
         self.assertFalse((self.root / '.update-pending.json').exists())
@@ -104,6 +108,17 @@ class UpdateTests(unittest.TestCase):
                 update.validate_installation(self.source, self.root)
             self.assertEqual(called.call_count, 1)
         self.assertEqual((self.root / 'config.json').read_text(), '{"private":true}')
+
+    def test_manifest_does_not_execute_release_code_and_protects_local_files(self):
+        (self.source / 'install.py').write_text('raise RuntimeError("must not execute")\nFILES=["app.py"]\nFILES += ["router.py"]\n')
+        self.assertEqual(update.release_files(self.source), ['app.py', 'router.py'])
+        (self.source / 'install.py').write_text('FILES=["app.py"]\nFILES.append("extra.py")\n')
+        with self.assertRaisesRegex(ValueError, 'Dynamic'):
+            update.release_files(self.source)
+        for manifest in ['["config.json"]', '["chat-config.json"]', '[".update-state.json"]', '["../escape"]', '["app.py", "app.py"]', 'build_files()']:
+            (self.source / 'install.py').write_text('FILES=' + manifest + '\n')
+            with self.assertRaises((ValueError, SyntaxError)):
+                update.release_files(self.source)
 
     def test_failed_staging_prevents_apply(self):
         def fake_run(*args, **kwargs):

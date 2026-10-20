@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pull tested main snapshots into an idle installation; never modify its Git checkout."""
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from install import write
 
 REPOSITORY = "https://github.com/Jakelul/TernPilot.git"
 
@@ -23,15 +25,31 @@ def lock_path(root):
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def release_files(source):
+    names = []
+    for node in ast.parse((source / "install.py").read_text()).body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "FILES" for t in node.targets):
+            value = ast.literal_eval(node.value)
+            if not isinstance(value, list):
+                raise ValueError("Invalid release manifest")
+            names = value
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "FILES":
+            value = ast.literal_eval(node.value)
+            if not isinstance(node.op, ast.Add) or not isinstance(value, list):
+                raise ValueError("Invalid release manifest")
+            names += value
+        elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and any(
+                isinstance(part, ast.Name) and part.id == "FILES" for part in ast.walk(node)):
+            raise ValueError("Dynamic release manifest is not supported")
+    if (not names or any(not isinstance(n, str) or not n or Path(n).name != n or n.startswith(".")
+                         or n in {"config.json", "chat-config.json", "update.log"} for n in names)
+            or len(names) != len(set(names))):
+        raise ValueError("Invalid release manifest or private file included")
+    return names
+
 def apply(source, root, revision):
     # Only installer-owned files are shipped. Settings, accounts and chats stay local.
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("release_install", source / "install.py")
-    installer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(installer)
-    names = installer.FILES
-    if not names or any(Path(n).name != n for n in names):
-        raise ValueError("Invalid release manifest")
+    names = release_files(source)
     state = root / ".update-state.json"
     previous = json.loads(state.read_text()) if state.exists() else {}
     for name, expected in previous.get("hashes", {}).items():
@@ -47,11 +65,11 @@ def apply(source, root, revision):
         if exists:
             shutil.copy2(root / name, backup / name)
     # Presence of this marker blocks launches until apply or recovery completes.
-    installer.write(root / ".update-pending.json", json.dumps(manifest))
+    write(root / ".update-pending.json", json.dumps(manifest))
     try:
         for name in names:
-            installer.write(root / name, (source / name).read_text(), (source / name).stat().st_mode & 0o777)
-        installer.write(state, json.dumps({"revision": revision, "hashes": {n: digest(root / n) for n in names}}))
+            write(root / name, (source / name).read_text(), (source / name).stat().st_mode & 0o777)
+        write(state, json.dumps({"revision": revision, "hashes": {n: digest(root / n) for n in names}}))
         (root / ".update-pending.json").unlink()
     except BaseException:
         recover(root)
@@ -87,10 +105,7 @@ def test_snapshot(source):
 
 def validate_installation(source, root):
     # Copy code and local config only; chats, logs and credentials never enter staging.
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("release_install", source / "install.py")
-    installer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(installer)
+    files = release_files(source)
     with tempfile.TemporaryDirectory(prefix="ternpilot-compat-") as temp:
         stage = Path(temp) / "runtime"
         stage.mkdir(mode=0o700)
@@ -101,7 +116,7 @@ def validate_installation(source, root):
                 raise ValueError("Linked installed code/config; update deferred")
             if path.is_file():
                 shutil.copy2(path, stage / name)
-        for name in installer.FILES:
+        for name in files:
             if Path(name).name != name or not (source / name).is_file() or (source / name).is_symlink():
                 raise ValueError("Invalid release manifest")
             shutil.copy2(source / name, stage / name)

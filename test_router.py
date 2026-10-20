@@ -160,6 +160,28 @@ class Integration(unittest.TestCase):
             self.assertEqual([c['engine'] for c in self.calls()][before:], ['codex'])
             self.assertEqual(json.loads((self.repo/'.ai/HANDOFF.json').read_text())['attempts'], [])
 
+    def test_transient_quota_phrases_never_handoff(self):
+        for message in ["HTTP 429: quota exceeded", "Quota exceeded for quota metric requests per minute", "RESOURCE_EXHAUSTED: quota exceeded; retry later"]:
+            event = json.dumps({'event':'result','result':{'status':'ERROR','error':message}})
+            self.assertEqual(router.outcome('gemini', 1, event, '')[:2], (True, False))
+        event = 'quota exceeded example prose\n' + json.dumps({'type':'turn.failed','error':{'message':'network disconnected'}})
+        self.assertEqual(router.outcome('codex', 1, event, '')[:2], (True, False))
+
+    def test_unsupported_backend_fails_pure_config_validation(self):
+        config = json.loads(self.config.read_text())
+        config['gemini_backend'] = 'legacy'
+        self.config.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'must be agy'):
+            router.load_config(self.config)
+        self.assertFalse((self.repo/'calls.jsonl').exists())
+
+    def test_soft_denial_summary_explains_failure(self):
+        event = json.dumps({'event':'result','result':{'status':'SUCCESS','response':'partial'}})
+        failed, limited, summary = router.outcome('gemini', 0, event, 'permission denied: tool requires approval')
+        self.assertTrue(failed)
+        self.assertFalse(limited)
+        self.assertIn('permission/approval denial', summary)
+
     def test_astra_timeout_and_dry_run(self):
         result = self.run_dev('기획', 'success', '--routing', 'astra', '--dry-run')
         self.assertEqual(result.returncode, 0, result.stderr)
