@@ -11,3 +11,10 @@ graphify-out/
 dist/
 *.zip
 *.bak
+
+chat-config.json
+
+.update-state.json
+.update-pending.json
+.update-backup/
+update.log

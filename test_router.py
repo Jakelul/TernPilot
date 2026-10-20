@@ -18,10 +18,28 @@ engine = pathlib.Path(sys.argv[0]).name
 if '--version' in sys.argv:
  print('fake 1.0'); sys.exit()
 if '--help' in sys.argv:
- print('--model --json --sandbox --output-format --permission-mode --no-session-persistence --approval-mode --prompt'); sys.exit()
+ print('--model --json --sandbox --config --effort --mode --input-format --disable-slash-commands --output-format --permission-mode --no-session-persistence --approval-mode --prompt --output-schema --output-last-message'); sys.exit()
 prompt = sys.stdin.read()
-with open('calls.jsonl','a') as f: f.write(json.dumps({'engine':engine,'argv':sys.argv,'prompt':prompt,'child':os.environ.get('DUORELAY_CHILD')})+'\\n')
+if '--input-format' in sys.argv: prompt = json.loads(prompt)['message']['content']
+with open('calls.jsonl','a') as f: f.write(json.dumps({'engine':engine,'argv':sys.argv,'prompt':prompt,'child':os.environ.get('DUORELAY_CHILD'),'disable_fast':os.environ.get('CLAUDE_CODE_DISABLE_FAST_MODE')})+'\\n')
 mode = os.environ.get('FAKE_MODE','success')
+if engine == 'gemini' and '--input-format' in sys.argv:
+ if mode == 'agy_denied': print('Tool soft-denied: command requires approval',file=sys.stderr)
+ result = {'status':'ERROR' if mode=='agy_quota' else 'SUCCESS','response':'done'}
+ if mode == 'agy_canceled': result['status']='CANCELED'
+ if mode == 'agy_quota': result['error']='quota exhausted'
+ print(json.dumps({'event':'result','result':result}));sys.exit()
+if '--output-schema' in sys.argv:
+ if mode == 'planner_timeout': time.sleep(30)
+ if mode in ('planner_quota','planner_denied'):
+  print(json.dumps({'type':'turn.failed','error':{'message':'usage_limit' if mode=='planner_quota' else 'permission denied'}}));sys.exit()
+ choice = {'engine':'gemini','kind':'planning','reason':'ordinary planning'}
+ if mode == 'planner_implementation': choice['kind'] = 'implementation'
+ if mode == 'planner_review': choice['kind'] = 'review'
+ if mode == 'planner_invalid': choice['engine'] = 'sh -c echo malicious'
+ answer = pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1])
+ answer.write_text(json.dumps(choice))
+ print(json.dumps({'type':'turn.completed'}));sys.exit()
 if mode == 'denied': print('permission denied: user rejected tool',file=sys.stderr);sys.exit(1)
 if engine == 'gemini' and mode == 'gemini_quota':
  print(json.dumps({'error':{'message':'quota exhausted'}}));sys.exit(0)
@@ -48,12 +66,12 @@ class Integration(unittest.TestCase):
             path = self.repo / engine
             path.write_text(FAKE)
             path.chmod(0o700)
-        config = dict(router.DEFAULT, codex_bin=str(self.repo/'codex'), claude_bin=str(self.repo/'claude'), gemini_bin=str(self.repo/'gemini'))
+        config = dict(router.DEFAULT, codex_bin=str(self.repo/'codex'), claude_bin=str(self.repo/'claude'), gemini_bin=str(self.repo/'gemini'), gemini_backend='legacy')
         self.config = self.repo / 'config.json'
         self.config.write_text(json.dumps(config))
 
     def run_dev(self, task='implement feature', mode='success', *flags):
-        return subprocess.run([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config), *flags, task],
+        return subprocess.run([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config), '--routing', 'rules', *flags, task],
                               capture_output=True, text=True, env=dict(os.environ, FAKE_MODE=mode), timeout=15)
 
     def calls(self):
@@ -65,6 +83,116 @@ class Integration(unittest.TestCase):
         self.assertEqual([c['engine'] for c in self.calls()], ['codex'])
         self.assertFalse((self.repo/'SHOULD_NOT_EXIST').exists())
         self.assertEqual(self.calls()[0]['child'], '1')
+        self.assertIn('model_reasoning_effort="medium"', self.calls()[0]['argv'])
+        self.assertIn('service_tier="default"', self.calls()[0]['argv'])
+
+    def test_astra_then_worker(self):
+        result = self.run_dev('아이디어 기획', 'success', '--routing', 'astra')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c['engine'] for c in self.calls()], ['codex', 'gemini'])
+        self.assertIn('read-only', self.calls()[0]['argv'])
+        self.assertIn('model_reasoning_effort="medium"', self.calls()[0]['argv'])
+        self.assertIn('service_tier="default"', self.calls()[0]['argv'])
+        self.assertIn('아이디어 기획', self.calls()[1]['prompt'])
+        state = json.loads((self.repo/'.ai/HANDOFF.json').read_text())
+        self.assertEqual(state['planner']['engine'], 'gemini')
+        self.assertEqual(len(state['attempts']), 1)
+        history = [json.loads(line) for line in (self.repo/'.ai/history.jsonl').read_text().splitlines()]
+        self.assertEqual(history[0]['phase'], 'routing')
+
+    def test_astra_guards_and_disabled_gemini(self):
+        for task, mode, engine in [('구현해줘', 'success', 'codex'), ('결제 검토', 'success', 'claude'),
+                                   ('opaque task', 'planner_implementation', 'codex'),
+                                   ('opaque task', 'planner_review', 'claude')]:
+            result = self.run_dev(task, mode, '--routing', 'astra', '--plan-only')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((self.repo/'.ai/HANDOFF.json').read_text())['engine'], engine)
+        config = json.loads(self.config.read_text())
+        config['gemini_enabled'] = False
+        self.config.write_text(json.dumps(config))
+        result = self.run_dev('기획', 'success', '--routing', 'astra')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]['engine'], 'claude')
+
+    def test_astra_invalid_and_denied(self):
+        for mode in ['planner_invalid', 'planner_denied']:
+            result = self.run_dev('기획', mode, '--routing', 'astra')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            state = json.loads((self.repo/'.ai/HANDOFF.json').read_text())
+            self.assertEqual(state['attempts'], [])
+            self.assertEqual(state['status'], 'blocked' if mode == 'planner_denied' else 'failed')
+        self.assertEqual([c['engine'] for c in self.calls()], ['codex', 'codex'])
+
+    def test_astra_quota(self):
+        result = self.run_dev('기획', 'planner_quota', '--routing', 'astra')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c['engine'] for c in self.calls()], ['codex', 'claude'])
+
+    def test_astra_timeout_and_dry_run(self):
+        result = self.run_dev('기획', 'success', '--routing', 'astra', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('undecided', result.stdout)
+        self.assertFalse((self.repo/'.ai').exists())
+        self.assertFalse((self.repo/'calls.jsonl').exists())
+        config = json.loads(self.config.read_text())
+        config['timeout_seconds'] = 1
+        self.config.write_text(json.dumps(config))
+        result = self.run_dev('기획', 'planner_timeout', '--routing', 'astra')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_default_astra_and_override(self):
+        result = subprocess.run([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config),
+                                 '--plan-only', '기획'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--output-schema', self.calls()[0]['argv'])
+        self.assertEqual(self.run_dev('기획', 'success', '--routing', 'astra', '--engine', 'claude').returncode, 0)
+        self.assertEqual(self.calls()[-1]['engine'], 'claude')
+        self.assertNotIn('--output-schema', self.calls()[-1]['argv'])
+        argv = self.calls()[-1]['argv']
+        self.assertEqual(argv[argv.index('--effort')+1], 'medium')
+        self.assertEqual(self.calls()[-1]['disable_fast'], '1')
+
+    def test_unsupported_effort_is_not_silently_ignored(self):
+        fake = self.repo/'claude'
+        fake.write_text(fake.read_text().replace('--effort ', ''))
+        result = self.run_dev('build', 'success', '--engine', 'claude')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--effort', result.stderr)
+        self.assertFalse((self.repo/'calls.jsonl').exists())
+
+    def test_antigravity_transport_and_soft_denial(self):
+        config = json.loads(self.config.read_text())
+        config['gemini_backend'] = 'agy'
+        self.config.write_text(json.dumps(config))
+        task = '기획 "quoted"\nsecond line'
+        result = self.run_dev(task, 'success', '--engine', 'gemini')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.calls()[0]
+        self.assertIn(task, call['prompt'])
+        self.assertIn('gemini-4-argon-high', call['argv'])
+        self.assertIn('--sandbox', call['argv'])
+        self.assertEqual(call['argv'][call['argv'].index('--effort')+1], 'high')
+        self.assertEqual(call['argv'][call['argv'].index('--mode')+1], 'plan')
+        result = self.run_dev(task, 'agy_denied', '--engine', 'gemini')
+        self.assertEqual(result.returncode, 1)
+        state = json.loads((self.repo/'.ai/HANDOFF.json').read_text())
+        self.assertEqual(state['status'], 'blocked')
+        self.assertEqual(len(state['attempts']), 1)
+        result = self.run_dev(task, 'agy_quota', '--engine', 'gemini')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c['engine'] for c in self.calls()][-2:], ['gemini','claude'])
+        result = self.run_dev(task, 'agy_canceled', '--engine', 'gemini')
+        self.assertEqual(result.returncode, 130)
+        state = json.loads((self.repo/'.ai/HANDOFF.json').read_text())
+        self.assertEqual(state['status'], 'interrupted')
+        self.assertEqual(len(state['attempts']), 1)
+
+    def test_antigravity_requires_success_status(self):
+        for status in ['ERROR','CANCELED','INTERRUPTED','RUNNING',None]:
+            output = json.dumps({'event':'result','result':{'status':status,'response':'partial'}})
+            self.assertTrue(router.outcome('gemini',0,output,'','agy')[0])
+        self.assertTrue(router.outcome('gemini',0,'{"response":"done"}','','agy')[0])
 
     def test_nested_router_is_rejected(self):
         result = subprocess.run([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config), 'implement'],
@@ -184,6 +312,7 @@ class Integration(unittest.TestCase):
         self.assertFalse(json.loads((dest/'config.json').read_text())['gemini_enabled'])
         self.assertEqual((home/'bin/ternpilot').resolve(), (dest/'dev').resolve())
         self.assertTrue((home/'TernPilot.app/Contents/MacOS/TernPilot').exists())
+        self.assertTrue((dest/'planner.py').is_file())
         self.assertTrue(list(codex_home.glob('AGENTS.md.before-ternpilot-*.bak')))
 
     def test_timeout_handoff(self):
@@ -213,7 +342,7 @@ class Integration(unittest.TestCase):
         import time
         fake = self.repo/'codex'
         fake.write_text(fake.read_text().replace("mode = os.environ", "pathlib.Path('child.pid').write_text(str(os.getpid()))\nmode = os.environ"))
-        process = subprocess.Popen([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config), 'implement'],
+        process = subprocess.Popen([str(ROOT/'dev'), '--repo', str(self.repo), '--config', str(self.config), '--routing', 'rules', 'implement'],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                    env=dict(os.environ, FAKE_MODE='timeout'))
         try:

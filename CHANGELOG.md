@@ -1,3 +1,9 @@
+## v0.4.0-preview.1
+
+- Astra task selection, Opus/Argon routing and local project/chat UI.
+- Per-task usage records, Obsidian Markdown export, weekly quota readers.
+- Opt-in hourly macOS updates from tested GitHub main snapshots; preserve local settings and defer while running.
+
 # Changelog
 
 ## 0.3.0-preview.1 — 2026-10-06

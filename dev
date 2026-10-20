@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
+import fcntl
 import runpy
+import sys
 from pathlib import Path
 
-runpy.run_path(str(Path(__file__).resolve().with_name("router.py")), run_name="__main__")
+root = Path(__file__).resolve().parent
+with (root.parent / ("." + root.name + ".update.lock")).open("a") as runtime_lock:
+    fcntl.flock(runtime_lock, fcntl.LOCK_SH)
+    if (root / ".update-pending.json").exists():
+        raise SystemExit("Interrupted update: run python3 " + str(root / "update.py") + " to recover.")
+    target = "chat.py" if "--chat" in sys.argv else "router.py"
+    if target == "chat.py":
+        sys.argv.remove("--chat")
+    runpy.run_path(str(root / target), run_name="__main__")

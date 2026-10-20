@@ -10,10 +10,10 @@ import shlex
 import shutil
 import tempfile
 
-FILES = ["dev", "router.py", "start.command", "install.sh", "install.py",
+FILES = ["dev", "router.py", "planner.py", "start.command", "install.sh", "install.py",
          "Install TernPilot.command", "config.example.json", "README.md",
          "test_router.py", "codex-global.instructions.txt"]
-FILES += ["LICENSE", "CLOUD_START.md"]
+FILES += ["update.py", "test_update.py", "LICENSE", "CLOUD_START.md", "chat.py", "usage.py", "quota.py", "test_quota.py", "test_usage.py", "chat.html", "test_chat.py", "chat-config.example.json"]
 BEGIN, END = "<!-- DUORELAY:BEGIN -->", "<!-- DUORELAY:END -->"
 
 
