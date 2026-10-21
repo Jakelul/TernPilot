@@ -15,6 +15,7 @@ import time
 import uuid
 from usage import totals, history
 from quota import QuotaMonitor
+from accounts import account_status, login
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -37,7 +38,7 @@ def markdown(chat):
     lines = ['# ' + chat['title'].replace('\n', ' '), '', '프로젝트: ' + chat['project'], '', '대화 ID: ' + chat['id'], '기기: ' + socket.gethostname(), '관련 프로젝트: [[TernPilot/프로젝트/TernPilot]]', '']
     for turn in chat['turns']:
         lines += ['## 요청', '', turn['request'], '', '## 결과', '',
-                  '상태: ' + turn['status'] + ' · 담당: ' + turn.get('engine', '미정'), '',
+                  '상태: ' + turn['status'] + ' · 담당: ' + {'codex':'Codex · Astra','claude':'Claude Code · Opus','gemini':'Gemini4 Argon'}.get(turn.get('engine'), '실행 모델 미확인') + (' · ' + turn['model'] if turn.get('model') else ''), '',
                   turn.get('answer', '진행 중'), '']
         if turn.get('run_id'):
             lines += ['실행 ID: ' + turn['run_id'], '']
@@ -84,7 +85,7 @@ class Store:
             if chat['project'] != project:
                 raise ValueError('Conversation belongs to another project')
             context = '\n\n'.join('User: ' + t['request'] + '\nResult: ' + t.get('answer', '') for t in chat['turns'][-4:])[-24000:]
-            chat['turns'].append({'request': request, 'status': 'running', 'engine': engine, 'started': time.time()})
+            chat['turns'].append({'request': request, 'status': 'running', 'engine': engine, 'requested_engine': engine, 'started': time.time()})
             self.persist(chat)
             self.busy = True
             threading.Thread(target=self.run, args=(chat, request, engine, context), daemon=True).start()
@@ -106,7 +107,11 @@ class Store:
                     turn.update(status=state['status'], engine=state.get('engine', engine), run_id=state.get('run_id'))
                     turn['usage'] = next((r['reports'] for r in history({chat['project']: str(repo)}) if r['run_id'] == state.get('run_id')), [])
                     if state.get('attempts'):
-                        turn['answer'] = state['attempts'][-1]['summary']
+                        attempt = state['attempts'][-1]
+                        turn['answer'] = attempt['summary']
+                        turn['engine'] = attempt.get('engine', turn['engine'])
+                        if isinstance(attempt.get('model'), str):
+                            turn['model'] = attempt['model']
         except Exception as error:
             turn.update(status='failed', answer=str(error))
         finally:
@@ -159,7 +164,7 @@ def main():
             self.send_header('Content-Type', kind + '; charset=utf-8')
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; connect-src 'self'")
+            self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'")
             self.end_headers()
             self.wfile.write(body)
 
@@ -170,9 +175,13 @@ def main():
             path = urlsplit(self.path).path
             if path == '/' and self.headers.get('Host') == f'127.0.0.1:{args.port}':
                 return self.reply(200, (HERE / 'chat.html').read_text(), 'text/html')
+            if path in ('/chat.js', '/chat.css', '/marked.js', '/purify.js') and self.headers.get('Host') == f'127.0.0.1:{args.port}':
+                return self.reply(200, (HERE / path[1:]).read_text(), 'text/css' if path.endswith('.css') else 'text/javascript')
             if not self.authorized():
                 return self.reply(403, {'error': 'Forbidden'})
             try:
+                if path == '/api/accounts':
+                    return self.reply(200, account_status(quotas.snapshot()))
                 if path == '/api/state':
                     chats = [json.loads(p.read_text()) for p in store.root.glob('*.json')]
                     return self.reply(200, {'projects': list(store.config['projects']), 'chats': chats, 'busy': store.busy, 'usage': totals(store.config['projects']), 'usage_records': history(store.config['projects']), 'quotas': quotas.snapshot()})
@@ -185,9 +194,14 @@ def main():
                 return self.reply(403, {'error': 'Forbidden'})
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size <= 100000 or self.path != '/api/send':
+                if not 0 < size <= 100000 or self.path not in ('/api/send', '/api/login'):
                     raise ValueError('Invalid request')
-                self.reply(200, store.submit(json.loads(self.rfile.read(size))))
+                data = json.loads(self.rfile.read(size))
+                if self.path == '/api/login':
+                    if store.busy:
+                        raise ValueError('진행 중인 작업이 끝난 후 계정을 변경해 주세요.')
+                    return self.reply(200, login(data.get('engine')))
+                self.reply(200, store.submit(data))
             except Exception as e:
                 self.reply(400, {'error': str(e)})
 

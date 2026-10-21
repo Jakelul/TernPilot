@@ -31,7 +31,7 @@ class UsageTests(unittest.TestCase):
             self.assertTrue(math.isfinite(by_id['old']['time']))
 
     def test_codex_option_is_present(self):
-        self.assertIn('<option value="codex">Astra</option>', Path(__file__).with_name('chat.html').read_text())
+        self.assertIn('<option value="codex">Codex · Astra</option>', Path(__file__).with_name('chat.html').read_text())
 
     def test_unique_logs_include_routing(self):
         with tempfile.TemporaryDirectory() as tmp:

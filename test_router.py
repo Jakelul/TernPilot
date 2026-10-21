@@ -354,7 +354,7 @@ class Integration(unittest.TestCase):
         dest = home/'TernPilot'
         args = [sys.executable, str(ROOT/'install.py'), '--install-dir', str(dest),
                 '--bin-dir', str(home/'bin'), '--app-dir', str(home/'TernPilot.app'),
-                '--codex-home', str(codex_home), '--enable-codex']
+                '--codex-home', str(codex_home), '--enable-codex', '--no-desktop']
         for _ in range(2):
             result = subprocess.run(args, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -365,7 +365,7 @@ class Integration(unittest.TestCase):
         self.assertNotIn('{{INSTALL_DIR}}', instructions)
         self.assertFalse(json.loads((dest/'config.json').read_text())['gemini_enabled'])
         self.assertEqual((home/'bin/ternpilot').resolve(), (dest/'dev').resolve())
-        self.assertTrue((home/'TernPilot.app/Contents/MacOS/TernPilot').exists())
+        self.assertFalse((home/'TernPilot.app').exists())
         self.assertTrue((dest/'planner.py').is_file())
         self.assertTrue(list(codex_home.glob('AGENTS.md.before-ternpilot-*.bak')))
 

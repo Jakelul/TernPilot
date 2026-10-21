@@ -15,6 +15,7 @@ FILES = ["dev", "router.py", "planner.py", "start.command", "install.sh", "insta
          "test_router.py", "codex-global.instructions.txt"]
 FILES += ["update.py", "test_update.py", "LICENSE", "CLOUD_START.md", "chat.py", "usage.py", "quota.py", "test_quota.py", "test_usage.py", "chat.html", "test_chat.py", "chat-config.example.json"]
 FILES += ["assist.py", "control.py", "gemini.py", "job.py", "test_assist.py", "test_control.py", "test_gemini.py", "test_job.py"]
+FILES += ["chat.js", "chat.css", "marked.js", "purify.js", "THIRD_PARTY_LICENSES.txt", "accounts.py", "desktop.py", "Desktop.swift", "build_desktop.py", "test_desktop.py", "DESKTOP.md"]
 BEGIN, END = "<!-- DUORELAY:BEGIN -->", "<!-- DUORELAY:END -->"
 
 
@@ -38,6 +39,7 @@ def main():
     p.add_argument("--app-dir", type=Path, default=Path.home()/"Applications/TernPilot.app")
     p.add_argument("--codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME", str(Path.home()/".codex"))))
     p.add_argument("--enable-codex", action="store_true", help="Allow bounded Claude/Gemini delegation in new Codex chats")
+    p.add_argument("--no-desktop", action="store_true", help="Install the runtime only, without building the macOS app")
     args = p.parse_args()
     src = Path(__file__).resolve().parent
     dest, bindir, appdir, codexdir = [x.expanduser().absolute() for x in
@@ -95,13 +97,9 @@ def main():
             print(f"Kept existing command: {link}")
             continue
         link.symlink_to(dest/"dev")
-    app = appdir/"Contents"
-    (app/"MacOS").mkdir(parents=True, exist_ok=True)
-    info = {"CFBundleName":"TernPilot", "CFBundleDisplayName":"TernPilot",
-            "CFBundleIdentifier":"local.ternpilot.launcher", "CFBundleVersion":"0.3.0",
-            "CFBundleExecutable":"TernPilot", "CFBundlePackageType":"APPL", "LSUIElement":True}
-    write(app/"Info.plist", plistlib.dumps(info).decode(), 0o644)
-    write(app/"MacOS/TernPilot", "#!/bin/sh\nexec /usr/bin/open -a Terminal "+shlex.quote(str(dest/"start.command"))+"\n", 0o755)
+    if not args.no_desktop:
+        from build_desktop import build
+        build(dest, appdir)
     if args.enable_codex:
         codexdir.mkdir(parents=True, exist_ok=True)
         if updated != original:

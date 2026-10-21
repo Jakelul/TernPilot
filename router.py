@@ -496,7 +496,7 @@ def main():
         blocked = bool(failed and DENIED.search(stderr + stdout + summary))
         canceled = engine == "gemini" and config["gemini_backend"] == "agy" and agy_canceled(stdout)
         blocked = blocked or canceled
-        record = {"engine": engine, "exit_code": code, "failed": failed, "limited": limited, "blocked": blocked,
+        record = {"engine": engine, "model": config[engine + "_model"], "exit_code": code, "failed": failed, "limited": limited, "blocked": blocked,
                   "summary": summary, "failure_tail": (stderr + stdout)[-8000:] if failed else "",
                   "stdout": str(out), "stderr": str(err), "time": time.time()}
         state["attempts"].append(record)
