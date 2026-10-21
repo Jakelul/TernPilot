@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const {marked} = require('./marked.js');
+const source = fs.readFileSync(__dirname + '/chat.js', 'utf8');
+vm.runInNewContext(source.slice(source.indexOf('marked.use('), source.indexOf('function safeMarkdown')), {marked});
+assert.match(marked.parse('**에이전트(Agent)**는 **"좋은 관점"**입니다.'), /<strong>에이전트\(Agent\)<\/strong>는 <strong>"좋은 관점"<\/strong>입니다/);
+assert.match(marked.parse('`**literal**`'), /<code>\*\*literal\*\*<\/code>/);
+assert.match(marked.parse('```\n**literal**\n```'), /<code>\*\*literal\*\*/);
+assert.match(marked.parse('| 모델 | 특징 |\n| --- | --- |\n| Gemini | **요약** |'), /<table>/);
+console.log('Markdown: Korean emphasis, literal code, and tables passed');

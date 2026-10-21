@@ -8,6 +8,12 @@ let selected=null,state={chats:[]},messageKey='',chatKey='',sending=false;
 const text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el};
 function icon(engine){const el=document.createElement('span');el.className='model-icon';el.setAttribute('aria-hidden','true');el.innerHTML=modelIcons[engine]||'✦';return el}
 async function api(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:{'X-TernPilot-Token':token,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const x=await r.json();if(!r.ok)throw Error(r.status===403?'연결이 만료됐습니다. TernPilot 앱을 다시 열어주세요.':x.error);return x}
+// Korean particles can follow a punctuation-ending bold phrase without spaces.
+marked.use({extensions:[{name:'koreanStrong',level:'inline',
+ start(src){return src.indexOf('**')},
+ tokenizer(src){const m=/^\*\*([^\n]+?)\*\*(?!\*)/.exec(src);if(m)return {type:'koreanStrong',raw:m[0],tokens:this.lexer.inlineTokens(m[1])}},
+ renderer(token){return '<strong>'+this.parser.parseInline(token.tokens)+'</strong>'}
+}]});
 function safeMarkdown(value){
  const rendered=marked.parse(value,{gfm:true,breaks:false});
  const clean=DOMPurify.sanitize(rendered,{ALLOWED_TAGS:['p','br','hr','h1','h2','h3','h4','h5','h6','strong','em','del','s','blockquote','ul','ol','li','pre','code','table','thead','tbody','tr','th','td','a'],ALLOWED_ATTR:['href','title','start'],ALLOW_DATA_ATTR:false});
